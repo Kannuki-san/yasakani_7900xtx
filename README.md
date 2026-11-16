@@ -1,4 +1,19 @@
-# YASAKANI
+# YASAKANI_7900xtx
+
+> [!WARNING]
+> **🚧 Work in Progress — Not Yet Functional**
+>
+> This project is an experimental Linux/HIP port of YASAKANI targeting the AMD Radeon RX 7900 XTX.
+>
+> The port is currently under active development and is **not yet ready for use**. Core functionality is still being implemented and validated.
+
+
+> **🚧 開発中 現在動作非対応**
+>
+> このプロジェクトは、YASAKANIをLinux環境のAMD Radeon RX 7900 XTX向けに移植する実験的なプロジェクトです。
+>
+> 現在も開発・検証を進めており、現時点では正常な動作はせず、実用できる状態ではありません。 主要機能の実装および検証を進めています。
+
 
 A local LLM engine for **Windows** and **one NVIDIA RTX GPU** (tested on the **RTX 5090**), built for one model: **Qwen3.8-27B**. Open source, Apache License 2.0.
 日本語は [README.ja.md](README.ja.md)。
