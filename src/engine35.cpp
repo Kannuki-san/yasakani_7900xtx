@@ -341,8 +341,9 @@ Engine35::Engine35(const std::string& path, int max_ctx, int flags) : flags_(fla
   { const char* e = std::getenv("YSKN_Q35_G6");
 #if defined(__HIP_PLATFORM_AMD__)
     // HIP default ON: the workspace feeds layer_prepare/prefill_vsp's trellis->int8
-    // predecode cache (reused by the hipBLAS prefill GEMM). mt_gemm6 itself stays
-    // disabled on gfx1100 (q35_g6_prepare: resident[]=0). Kill: YSKN_Q35_G6=0.
+    // predecode cache, consumed only by launch_q35_g6 when resident[]>0 (CUDA). On HIP
+    // mt_gemm6 stays disabled (q35_g6_prepare: resident[]=0) so the vsp decode is skipped
+    // (Q5 gate) -- hipBLAS/PFA decode weights themselves. Kill: YSKN_Q35_G6=0.
     const bool g6_on = (!e || std::atoi(e) != 0) && xsm_ && !xsm_part_;
 #else
     const bool g6_on = e && std::atoi(e) != 0 && xsm_ && !xsm_part_;   // CUDA default unchanged (opt-in)

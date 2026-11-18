@@ -286,8 +286,10 @@ void q35_g6_prepare(Q35G6Workspace& W, int sms) {
   // dynamic-LDS launch fails with "invalid argument". Keep resident[] = 0 so
   // launch_q35_g6 always declines; the engine then uses the hipBLAS prefill GEMM
   // (backends/hip/prefill) or PFA when that is killed. The weight workspace is
-  // still allocated by the engine and used by layer_prepare/prefill_vsp for the
-  // trellis->int8 predecode cache, which the hipBLAS path reuses.
+  // still allocated (layer_prepare eligibility gate) but the vsp trellis->int8
+  // predecode is skipped on HIP (Q5): no consumer exists while resident[]=0 --
+  // hipBLAS/PFA decode weights themselves; only launch_q35_g6 (CUDA, resident>0)
+  // reads that cache.
   (void)sms;
 #else
   W.resident[0] = g6_prepare_kernel<4, false, false>(sms);
