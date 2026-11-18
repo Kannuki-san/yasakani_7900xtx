@@ -314,7 +314,10 @@ __global__ void __launch_bounds__((NR > 1 ? NR : (UWX ? UWX : lno_uw<MT>())) * 3
       // reused per m-step with full barriers guaranteeing write->read visibility and read->next-write safety.
       #pragma unroll
       for (int j = 0; j < 4; ++j) s_astage[threadIdx.x * 5 + j] = A[j];
-      __syncthreads();
+      // Per-warp staging region (threadIdx.x*5): no cross-warp hazard, so a warp-level LDS
+      // fence (s_waitcnt lgkmcnt=0) suffices for write->read visibility; a full __syncthreads
+      // would serialize all warps and block decode/WMMA overlap (~10% slower in microbench).
+      __builtin_amdgcn_s_waitcnt(0);
       const bool ah = (lane >= 17) && (lane & 1), au = (lane < 16 && !(lane & 1)) || ah;
       const int rA = ah ? (lane - 17) / 2 : lane / 2;
       yskn::arch::yskn_v4i A0 = {0, 0, 0, 0}, A1 = {0, 0, 0, 0};
@@ -328,7 +331,7 @@ __global__ void __launch_bounds__((NR > 1 ? NR : (UWX ? UWX : lno_uw<MT>())) * 3
         const uint4& v = xb[nb];
         yskn::arch::mma_s8_acc_amd_prestaged(macc[nb], A0, A1, (m & 1) ? v.z : v.x, (m & 1) ? v.w : v.y);
       }
-      __syncthreads();
+      __builtin_amdgcn_s_waitcnt(0);   // read->next-write safety within the warp (per-warp region)
 #else
       #pragma unroll
       for (int nb = 0; nb < NB; ++nb) {
