@@ -783,6 +783,25 @@ static int atx_ns_env() { static const int v = [] { const char* e = std::getenv(
 constexpr size_t ATX_T_SMEM = (size_t)2 * 2 * ATX_KT * Q35_HD * 2 + (size_t)2 * ATX_KT * Q35_HD + (size_t)2 * ATX_KT * 4;   
 constexpr size_t atx_smem8(int ns) { return (size_t)2 * ATX_KT * ATX_LD * 2 + (size_t)ns * 2 * ATX_KT * Q35_HD + (size_t)ns * 2 * ATX_KT * 4; }   
 void launch_q35_atx(const Q35AttnArgs& A, const uint8_t* wk, cudaStream_t st) {
+#if defined(__HIP_PLATFORM_AMD__)
+  // gfx1100 caps a CTA at 64KB LDS: the NS=2 tile (ATX_SMEM=67584B), NS=3/4, atx2 and
+  // vsp tiles (82-101KB) all fail to launch here (kdbg-verified: q35_atx_kernel<true,6>
+  // smem=67584 "invalid argument", the M>64 prefill attention failure). The kernel
+  // already implements an NS=1 single-stage path; its footprint (one bf16 K/V tile +
+  // one int8 stage + scales) is 50432B and fits. Attention is <1% of prefill GPU time,
+  // so losing the double-buffer overlap is negligible. CUDA keeps the original path.
+  // KVX_MODE=3 (the supported HIP config) always has INT8 KV; bf16/fp16 KV tiles do
+  // not fit 64KB and are rejected explicitly instead of failing at launch.
+  if (A.k8 && !A.kv_fp16) {
+    constexpr size_t ATX_SMEM1 = (size_t)2 * ATX_KT * ATX_LD * 2 + (size_t)2 * ATX_KT * Q35_HD + (size_t)2 * ATX_KT * 4;
+    static bool attr1 = false;
+    if (!attr1) { cudaFuncSetAttribute(q35_atx_kernel<true, 6, 1>, cudaFuncAttributeMaxDynamicSharedMemorySize, (int)ATX_SMEM1);
+                  (void)cudaGetLastError(); attr1 = true; }
+    launch_k(q35_atx_kernel<true, 6, 1>, dim3((A.M + 15) / 16, A.splits, Q35_KVH), dim3(192), ATX_SMEM1, st, Q35AtxArgs{A, wk});
+    return;
+  }
+  throw std::runtime_error("launch_q35_atx: HIP supports INT8 KV only (64KB LDS limit)");
+#endif
   static bool attr = false;
   if (!attr) { cudaFuncSetAttribute(q35_atx_kernel<false, 6>, cudaFuncAttributeMaxDynamicSharedMemorySize, ATX_SMEM);
                cudaFuncSetAttribute(q35_atx_kernel<false, 6, 2, true>, cudaFuncAttributeMaxDynamicSharedMemorySize, ATX_SMEM);
