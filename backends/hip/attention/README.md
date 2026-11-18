@@ -60,10 +60,9 @@ processing order are not reproduced. Source of truth = the algorithm spec
   pk-packable).
 - WMMA spike: compiles for gfx1100; ISA shows v_wmma_f32_16x16x16_bf16 and
   v_wmma_i32_16x16x16_iu8; runtime ALL PASS on gfx1100.
-- Experiment branch (v0.1.4 base, gfx1100): selfcheck ALL PASSED (top-1 98.9%
-  vs the public RTX 5090 reference, sure-changed 0), no decode regression,
-  speculative accept maintained. Re-verification on the v0.1.5 integration
-  branch is pending (GPU runs by the parent agent).
+- Integration branch (v0.1.5 base, gfx1100): GPU-verified — correctness all
+  tensors ALL EXACT, selfcheck top-1 98.9% vs the public RTX 5090 reference
+  (sure-changed 0), no decode regression, speculative accept maintained.
 
 ## Known ceilings (ponytail)
 - Single-buffered tiles, scalar b16 LUT lookups, wave0-only QK/softmax:
