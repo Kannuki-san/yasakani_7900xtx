@@ -1395,6 +1395,13 @@ int Engine35::prefill_vsp(const int32_t* ids, int n) {
   struct Restore { Engine35* e; float* h; uint16_t* xn; float* S; ~Restore() { e->h_ = h; e->xn_ = xn; e->S_ = S; e->qx_ = e->scr_qx_; e->alpha_ = e->scr_al_;
                                                                             e->tq_qx_ = nullptr; e->tq_al_ = nullptr; e->g6_.cached.clear(); } } restore{this, h_scr, xn_scr, S_scr};
   const int pos0 = pos_; int last_m = 0;
+  // Q5: g6_.cached's only reader is launch_q35_g6 (q35_g6.cu), which declines before
+  // touching the cache when all resident[]==0 (HIP: mt_gemm6 disabled). hipBLAS prefill
+  // and PFA use their own weight paths, so the per-layer predecode is pure waste there.
+  // Kill: YSKN_Q5_SKIP_PREDECODE=0 restores the old always-decode behavior.
+  const char* q5e = std::getenv("YSKN_Q5_SKIP_PREDECODE");
+  const bool q5_skip = (!q5e || std::atoi(q5e) != 0) &&
+      g6_.resident[0] == 0 && g6_.resident[1] == 0 && g6_.resident[2] == 0 && g6_.resident[3] == 0;
   for (int r0 = 0; r0 < n; r0 += SC) {
     const int nsc = std::min(SC, n - r0), nsub = (nsc + PM_ - 1) / PM_;
     const int per = std::min(PM_, ((nsc + nsub - 1) / nsub + 63) / 64 * 64);   
@@ -1407,7 +1414,7 @@ int Engine35::prefill_vsp(const int32_t* ids, int n) {
         if(b>a)launch_q35_capture_a8(h_+(size_t)(a-g0)*H_,k,a-(n-TW),ncap,bdr_.signs,tc_dq_,tc_da_,b-a,st_);
       } };
     for (int l = 0; l < nlayers_; ++l) {
-      layer_decode(l);
+      if (!q5_skip) layer_decode(l);
       if (nb_go && !L_[l].full) {                                      
         const int ns = (nsc + per - 1) / per;
         auto sub_m = [&](int i) { return std::min(per, nsc - i * per); };
