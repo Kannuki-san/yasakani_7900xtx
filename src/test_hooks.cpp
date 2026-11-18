@@ -77,3 +77,6 @@ extern "C"  int yskn_test_gemv_rot(const void* const* d_frags, int n_mats, const
   e = cudaDeviceSynchronize(); if (e != cudaSuccess) return (int)e;
   return (int)cudaGetLastError();
 }
+
+#include "pdl.cuh"
+extern "C" void yskn_kprof_dump() { yskn::kprof_dump(); }

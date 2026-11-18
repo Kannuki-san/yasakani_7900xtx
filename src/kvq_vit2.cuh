@@ -148,7 +148,9 @@ __device__ __forceinline__ void tbf2_work(const TbFastArgs& A, unsigned char* ws
     else { jj = 4 * (i >> 1) + 2 * (lh >> 3) + (i & 1); d = 8 * jj + (lh & 7); }
     const int c = (int)(short)tb_u16(b + to + 12 + 2 * d);
     Ac[i] = KQ * c * c + jj; Bc[i] = -2 * KQ * c;
-    asm volatile("" : "+r"(Ac[i]), "+r"(Bc[i]));                             
+#ifndef __HIP_PLATFORM_AMD__
+    asm volatile("" : "+r"(Ac[i]), "+r"(Bc[i]));   // register-keep hint; the AMD backend miscompiles it (VGPR/SGPR copy)
+#endif                             
   }
   if (lh < UU) W.mk[0][pr][lh] = (lh == 0) ? 0 : (KQ << 24);                 
   __syncwarp();

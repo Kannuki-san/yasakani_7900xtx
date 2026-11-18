@@ -1,5 +1,6 @@
 // SPDX-License-Identifier: Apache-2.0
 // Copyright (c) 2026 the YASAKANI authors
+#include "gpu_arch.cuh"
 #include "pdl.cuh"
 #include <stdexcept>
 #include <cstdlib>
@@ -42,12 +43,9 @@ template <int K> __device__ __forceinline__ unsigned lno_field(const unsigned* w
   if (sh + FB > 32) v |= w[wi + 1] << (32 - sh);
   if constexpr (FB >= 32) return v; else return v & ((1u << FB) - 1u);
 }
-__device__ __forceinline__ void lno_mma(int* d, const unsigned* a, uint2 b) {
-  asm volatile("mma.sync.aligned.m16n8k32.row.col.s32.s8.s8.s32 {%0,%1,%2,%3}, {%4,%5,%6,%7}, {%8,%9}, {%0,%1,%2,%3};\n"
-               : "+r"(d[0]), "+r"(d[1]), "+r"(d[2]), "+r"(d[3]) : "r"(a[0]), "r"(a[1]), "r"(a[2]), "r"(a[3]), "r"(b.x), "r"(b.y));
-}
+__device__ __forceinline__ void lno_mma(int* d, const unsigned* a, uint2 b) { yskn::arch::mma_s8(d, a, b.x, b.y); }
 __device__ __forceinline__ float lno_madd(float acc, float a, float b) { return __fadd_rn(acc, __fmul_rn(a, b)); }   
-__device__ __forceinline__ void lno_touch(const uint4* p) { unsigned x; asm volatile("ld.global.nc.u32 %0, [%1];" : "=r"(x) : "l"(p)); asm volatile("" :: "r"(x)); }   
+__device__ __forceinline__ void lno_touch(const uint4* p) { unsigned x = yskn::arch::ld_nc_u32(p); (void)x; }   
 
 __device__ __forceinline__ float lno_xsm_rm(const float* __restrict__ al, int G) { float m = 0.f; for (int k = 0; k < G; ++k) m = fmaxf(m, __ldg(al + k)); return m > 0.f ? __fdiv_rn(16777216.f, m) : 0.f; }
 __device__ __forceinline__ float lno_xsm_us(const float* __restrict__ al, int G) { float m = 0.f; for (int k = 0; k < G; ++k) m = fmaxf(m, __ldg(al + k)); return ldexpf(m, -24); }
@@ -307,7 +305,7 @@ __global__ void __launch_bounds__((NR > 1 ? NR : (UWX ? UWX : lno_uw<MT>())) * 3
       q0 = p20 >> TS; q1 = p21 >> TS;
       #pragma unroll
       for (int nb = 0; nb < NB; ++nb) {
-        if ((m & 1) == 0) xb[nb] = xp[nb] ? __ldg(xp[nb] + (LO ? (m >> 1) * 32 : (m >> 1))) : make_uint4(0u, 0u, 0u, 0u);   
+        if ((m & 1) == 0) xb[nb] = xp[nb] ? __ldg(xp[nb] + (LO ? (m >> 1) * 32 : (m >> 1))) : make_uint4(0u, 0u, 0u, 0u);
         const uint4& v = xb[nb];
         lno_mma(d[nb], A, (m & 1) ? make_uint2(v.z, v.w) : make_uint2(v.x, v.y));
       }
@@ -449,6 +447,7 @@ void launch_lnord_xw(const GemvLaunch& P, cudaStream_t st) {
   }
 }
 void launch_lnord(const GemvLaunch& P, cudaStream_t st) {
+  if (kprof_on()) { uint64_t b = 0; int K = lnord_k(P); for (int s = 0; s < P.n_seg; ++s) b += (uint64_t)P.seg[s].t.N * P.seg[s].t.Kc * K / 8; kprof_lno_bytes() += b; }
   switch (lnord_k(P)) {
     case 4: launch_lno_m<4>(P, st); break;
     case 6: launch_lno_m<6>(P, st); break;

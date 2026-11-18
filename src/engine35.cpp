@@ -855,7 +855,7 @@ void Engine35::attn_block(Q35Layer& Y, int M, const int* dpos, int* slices) {
                       if (atx_ && atx_long_ > 0 && sp != atx_short_) { AT.splits_short = atx_short_; AT.long_len = atx_long_; }
                       AT.vsp = atx_vsp_;
                       if (kz) launch_q35_kz(AT, wk_now_ ? d_wk_ : nullptr, st_);
-                      else if (atx_) { if (cap_ord >= 0) launch_q35_atx_pk(AT, wk_now_ ? d_wk_ : nullptr, Q35PkArgs{Y.kp, Y.vp, Y.kps, Y.vps, tb_rec_, cap_ord, tbcap_kb_}, st_); else launch_q35_atx(AT, wk_now_ ? d_wk_ : nullptr, st_); }
+                      else if (atx_) { if (cap_ord >= 0) launch_q35_atx_pk_dispatch(AT, wk_now_ ? d_wk_ : nullptr, Q35PkArgs{Y.kp, Y.vp, Y.kps, Y.vps, tb_rec_, cap_ord, tbcap_kb_}, st_); else launch_q35_atx(AT, wk_now_ ? d_wk_ : nullptr, st_); }
                       else if (wk_now_) launch_wk_attention(AT, d_wk_, st_);
                       else if (fa) launch_q35_fa(AT, st_); else launch_q35_attention(AT, st_); }
     if (!ks(16384)) { Q35CombineArgs CB{pm_, pl_, pacc_, sp, M, gate16_, Y.o.signs_in, qx_, alpha_}; CB.lo = lo_now_ ? 1 : 0;
@@ -868,7 +868,7 @@ void Engine35::attn_block(Q35Layer& Y, int M, const int* dpos, int* slices) {
       Q35AttnArgs AS{q16_ + qo, Y.kc, Y.vc, max_ctx_, Ms, slices + s / Mmax_, sp, pm_, pl_, pacc_}; AS.k8 = Y.k8; AS.v8 = Y.v8; AS.ks = Y.ks; AS.vs = Y.vs; AS.kv_fp16 = kv_fp16_;
       if (atx_ && atx_long_ > 0 && sp != atx_short_) { AS.splits_short = atx_short_; AS.long_len = atx_long_; }
       AS.vsp = atx_vsp_;
-      if (kz) launch_q35_kz(AS, nullptr, st_); else if (atx_) { if (cap_ord >= 0) launch_q35_atx_pk(AS, nullptr, Q35PkArgs{Y.kp, Y.vp, Y.kps, Y.vps, tb_rec_, cap_ord, tbcap_kb_}, st_); else launch_q35_atx(AS, nullptr, st_); } else if (fa) launch_q35_fa(AS, st_); else launch_q35_attention(AS, st_);
+      if (kz) launch_q35_kz(AS, nullptr, st_); else if (atx_) { if (cap_ord >= 0) launch_q35_atx_pk_dispatch(AS, nullptr, Q35PkArgs{Y.kp, Y.vp, Y.kps, Y.vps, tb_rec_, cap_ord, tbcap_kb_}, st_); else launch_q35_atx(AS, nullptr, st_); } else if (fa) launch_q35_fa(AS, st_); else launch_q35_attention(AS, st_);
       Q35CombineArgs CB{pm_, pl_, pacc_, sp, Ms, gate16_ + qo, Y.o.signs_in, qx_ + qo, alpha_ + (size_t)s * (Q35_NH * Q35_HD / 512)};
       if (atx_ && atx_long_ > 0 && sp != atx_short_) { CB.d_pos = slices + s / Mmax_; CB.splits_short = atx_short_; CB.long_len = atx_long_; }
       if (kz) launch_q35_kz_combine(CB, kdbg ? kdbg + qo : nullptr, st_); else launch_q35_combine(CB, st_);
@@ -1379,10 +1379,11 @@ void Engine35::nll_layer(const int32_t* ids, int n, float* out) {
 
 int Engine35::prefill_chunks(const int32_t* ids, int n) {
   if (n < 1 || pos_ + n > max_ctx_) throw std::runtime_error("prefill: context overflow");
+  static const bool nograph = [] { const char* e = std::getenv("YSKN_PREFILL_NOGRAPH"); return e && std::atoi(e) != 0; }();   // diagnostic: graph-free prefill so the kernel profiler (YSKN_PROFILE) captures every launch
   for (int done = 0; done < n;) {
     const int M = std::min(PM_, n - done); const bool last = done + M == n;
     upload_rows(ids + done, M, nullptr);
-    run_pass(M, true, last ? HEAD_LAST : HEAD_NONE, false, false, true);
+    run_pass(M, true, last ? HEAD_LAST : HEAD_NONE, false, false, !nograph);
     if (mtp_.on) mtp_catchup(M);
     if (bdr_.on) bdraft_ctx(0, M, pos_);                               
     if (last) cudaMemcpyAsync(h_pin_ + PIN_AM, d_next8_ + M - 1, 4, cudaMemcpyDeviceToHost, st_);

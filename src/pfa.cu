@@ -1,5 +1,6 @@
 // SPDX-License-Identifier: Apache-2.0
 // Copyright (c) 2026 the YASAKANI authors
+#include "gpu_arch.cuh"
 #include "pdl.cuh"
 #include <stdexcept>
 #include <type_traits>
@@ -41,26 +42,24 @@ __device__ __forceinline__ void pfa_mma(int* d, const unsigned* a, uint2 b) {
 #ifdef PFA_EMU
   emu::mma_m16n8k32_s8(d, a, b.x, b.y);
 #else
-  asm volatile("mma.sync.aligned.m16n8k32.row.col.s32.s8.s8.s32 {%0,%1,%2,%3}, {%4,%5,%6,%7}, {%8,%9}, {%0,%1,%2,%3};\n"
-               : "+r"(d[0]), "+r"(d[1]), "+r"(d[2]), "+r"(d[3]) : "r"(a[0]), "r"(a[1]), "r"(a[2]), "r"(a[3]), "r"(b.x), "r"(b.y));
+  yskn::arch::mma_s8(d, a, b.x, b.y);
 #endif
 }
 __device__ __forceinline__ void pfa_cp8(void* smem_dst, const void* gmem_src) {    
 #ifdef PFA_EMU
   std::memcpy(smem_dst, gmem_src, 8);
 #else
-  unsigned s; asm volatile("{ .reg .u64 t; cvta.to.shared.u64 t, %1; cvt.u32.u64 %0, t; }\n" : "=r"(s) : "l"(smem_dst));
-  asm volatile("cp.async.ca.shared.global [%0], [%1], 8;\n" :: "r"(s), "l"(gmem_src) : "memory");
+  yskn::arch::cp8(smem_dst, gmem_src);
 #endif
 }
 __device__ __forceinline__ void pfa_cp_commit() {
 #ifndef PFA_EMU
-  asm volatile("cp.async.commit_group;\n" ::: "memory");
+  yskn::arch::cp_commit();
 #endif
 }
 __device__ __forceinline__ void pfa_cp_wait() {
 #ifndef PFA_EMU
-  asm volatile("cp.async.wait_all;\n" ::: "memory");
+  yskn::arch::cp_wait_all();
 #endif
 }
 template <int K> __device__ __forceinline__ unsigned pfa_field(const unsigned* w, int i) {   
@@ -76,7 +75,7 @@ __device__ __forceinline__ void pfa_mad_wide(long long& acc, int a, int b) {
 #ifdef PFA_EMU
   acc += (long long)a * (long long)b;
 #else
-  asm("mad.wide.s32 %0, %1, %2, %0;" : "+l"(acc) : "r"(a), "r"(b));
+  acc += (long long)a * (long long)b;   // exact integer math, same as mad.wide.s32 on both backends
 #endif
 }
 struct PfaStep { int g, w; bool last; };   

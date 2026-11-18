@@ -1,5 +1,6 @@
 // SPDX-License-Identifier: Apache-2.0
 // Copyright (c) 2026 the YASAKANI authors
+#include "gpu_arch.cuh"
 #include "pdl.cuh"
 #include <stdexcept>
 #include <vector>
@@ -42,10 +43,7 @@ template <int K> __device__ __forceinline__ unsigned f_field(const unsigned* w, 
   if (sh + FB > 32) v |= w[wi + 1] << (32 - sh);
   if constexpr (FB >= 32) return v; else return v & ((1u << FB) - 1u);
 }
-__device__ __forceinline__ void f_mma(int* d, const unsigned* a, uint2 b) {
-  asm volatile("mma.sync.aligned.m16n8k32.row.col.s32.s8.s8.s32 {%0,%1,%2,%3}, {%4,%5,%6,%7}, {%8,%9}, {%0,%1,%2,%3};\n"
-               : "+r"(d[0]), "+r"(d[1]), "+r"(d[2]), "+r"(d[3]) : "r"(a[0]), "r"(a[1]), "r"(a[2]), "r"(a[3]), "r"(b.x), "r"(b.y));
-}
+__device__ __forceinline__ void f_mma(int* d, const unsigned* a, uint2 b) { yskn::arch::mma_s8(d, a, b.x, b.y); }
 __device__ __forceinline__ long long f_xsm_A(float alpha, float rm) { return (long long)__float2int_rn(__fmul_rn(alpha, rm)); }
 __device__ __forceinline__ float f_xsm_r(const float* S, float eps) {   
   float s = 0.f;
@@ -53,8 +51,8 @@ __device__ __forceinline__ float f_xsm_r(const float* S, float eps) {
   for (int b = 0; b < Q35_H / 512; ++b) s = __fadd_rn(s, __ldcg(S + b));
   const float a = __fadd_rn(__fdiv_rn(s, (float)Q35_H), eps); return flow_pm_on ? pm_rsqrt(a) : rsqrtf(a); }
 __device__ __forceinline__ float f_xsm_us(const float* al, int G) { float m = 0.f; for (int k = 0; k < G; ++k) m = fmaxf(m, __ldcg(al + k)); return ldexpf(m, -24); }   
-__device__ __forceinline__ unsigned long long f_gt() { unsigned long long t; asm volatile("mov.u64 %0, %%globaltimer;" : "=l"(t)); return t; }
-__device__ __forceinline__ unsigned f_ld_acq(const unsigned* p) { unsigned v; asm volatile("ld.acquire.gpu.global.u32 %0, [%1];" : "=r"(v) : "l"(p) : "memory"); return v; }
+__device__ __forceinline__ unsigned long long f_gt() { return yskn::arch::globaltimer(); }
+__device__ __forceinline__ unsigned f_ld_acq(const unsigned* p) { return yskn::arch::ld_acquire_gpu(p); }
 
 __device__ __forceinline__ void f_fwht(float (&v)[8], float* xs) {
   const int tid = threadIdx.x, lane = tid & 31;

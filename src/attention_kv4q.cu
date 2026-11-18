@@ -1,5 +1,6 @@
 // SPDX-License-Identifier: Apache-2.0
 // Copyright (c) 2026 the YASAKANI authors
+#include "gpu_arch.cuh"
 #include "pdl.cuh"
 #include <cuda_fp16.h>
 #include "a8_prologue.cuh"
@@ -40,7 +41,7 @@ __device__ __forceinline__ void attn_split_combine(float4* sacc, float* sm, floa
   if ((lane & 3) == 0 && lane < 28) { sm[warp * 7 + (lane >> 2)] = mh; sl[warp * 7 + (lane >> 2)] = lh; }
   #pragma unroll
   for (int i = 0; i < 7; ++i) sacc[(warp * 7 + i) * 32 + lane] = make_float4(acc[i][0], acc[i][1], acc[i][2], acc[i][3]);
-  if (bar_id) asm volatile("bar.sync %0, 128;" :: "r"(bar_id) : "memory"); else __syncthreads();
+  if (bar_id) yskn::arch::bar_sync(bar_id, 128); else __syncthreads();
   const int hi = min(lane >> 2, 6), wi = lane & 3;                         
   const float mv = sm[wi * 7 + hi], lv = sl[wi * 7 + hi];
   float M2 = fmaxf(mv, __shfl_xor_sync(0xffffffffu, mv, 1));
@@ -310,7 +311,7 @@ __global__ void __launch_bounds__(512) attention_prefill_f32_kernel(AttnArgs A, 
       attn_token(q, kd, vd, lane, mh, lh, acc);
     }
     attn_split_combine(reinterpret_cast<float4*>(sacc), sm, sl, grp + 1, warp, lane, mh, lh, acc, A.pm, A.pl, A.pacc, ((size_t)tok * A.splits + split) * 28 + kvh * 7);
-    asm volatile("bar.sync %0, 128;" :: "r"(grp + 1) : "memory");
+    yskn::arch::bar_sync(grp + 1, 128);
   }
   __syncthreads();
   attn_final_combine7(A, tok, kvh, bv, o16);                                
@@ -435,7 +436,7 @@ __global__ void __launch_bounds__(512) attention_prefill_kernel(AttnArgs A, cons
       attn_softmax7(v1, mh, lh, acc, vd);
     }
     attn_split_combine(reinterpret_cast<float4*>(sacc), sm, sl, grp + 1, warp, lane, mh, lh, acc, A.pm, A.pl, A.pacc, ((size_t)tok * A.splits + split) * 28 + kvh * 7);
-    asm volatile("bar.sync %0, 128;" :: "r"(grp + 1) : "memory");            
+    yskn::arch::bar_sync(grp + 1, 128);            
   }
   __syncthreads();                                                          
   attn_final_combine7(A, tok, kvh, bv, o16);                                

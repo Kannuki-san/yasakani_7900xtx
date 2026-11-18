@@ -1,6 +1,7 @@
 // SPDX-License-Identifier: Apache-2.0
 // Copyright (c) 2026 the YASAKANI authors
 #pragma once
+#include "gpu_arch.cuh"
 #include <cuda_fp16.h>
 #include <cstdint>
 namespace yskn {
@@ -109,16 +110,10 @@ template <int K> __device__ __forceinline__ uint2 v2_bfrag_band_q(const UnitQ<K>
   const uint32_t b0 = r8[yq_state<K>(u, 4 * m + 2) >> (L_BITS - K)], b1 = r8[yq_state<K>(u, 4 * m + 3) >> (L_BITS - K)];
   return make_uint2(a0 | (a1 << 16), b0 | (b1 << 16));
 }
-__device__ __forceinline__ void mma_s8_16832(int32_t* d, const uint32_t* a, uint2 b) {
-  asm volatile("mma.sync.aligned.m16n8k32.row.col.s32.s8.s8.s32 {%0,%1,%2,%3}, {%4,%5,%6,%7}, {%8,%9}, {%0,%1,%2,%3};\n"
-               : "+r"(d[0]), "+r"(d[1]), "+r"(d[2]), "+r"(d[3]) : "r"(a[0]), "r"(a[1]), "r"(a[2]), "r"(a[3]), "r"(b.x), "r"(b.y));
-}
-__device__ __forceinline__ void cp_async16(void* smem, const void* gmem) {
-  const unsigned s = (unsigned)__cvta_generic_to_shared(smem);
-  asm volatile("cp.async.cg.shared.global [%0], [%1], 16;\n" :: "r"(s), "l"(gmem));
-}
-__device__ __forceinline__ void cp_commit() { asm volatile("cp.async.commit_group;\n" ::); }
-template <int N> __device__ __forceinline__ void cp_wait() { asm volatile("cp.async.wait_group %0;\n" :: "n"(N)); }
+__device__ __forceinline__ void mma_s8_16832(int32_t* d, const uint32_t* a, uint2 b) { yskn::arch::mma_s8(d, a, b.x, b.y); }
+__device__ __forceinline__ void cp_async16(void* smem, const void* gmem) { yskn::arch::cp16(smem, gmem); }
+__device__ __forceinline__ void cp_commit() { yskn::arch::cp_commit(); }
+template <int N> __device__ __forceinline__ void cp_wait() { yskn::arch::cp_wait<N>(); }
 
 
 template <int K> __device__ __forceinline__ void unit_from_ring(Unit<K>& u, const unsigned char* stage, int j, int r) {

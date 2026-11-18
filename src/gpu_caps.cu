@@ -25,6 +25,19 @@ std::string cuda_error(cudaError_t e) { return std::string(cudaGetErrorName(e)) 
 }  // namespace
 
 void select_gpu(int device) {
+#if defined(__HIP_PLATFORM_AMD__)
+  // Native AMD path (RDNA3 first). The engine's sm_90+ features (PDL, bulk L2 prefetch) stay off;
+  // the Python layer sees a non-RTX-5090 GPU and uses the tolerant self-check path.
+  if (hipSetDevice(device) != hipSuccess)
+    throw std::runtime_error("HIP device " + std::to_string(device) + " cannot be used");
+  hipDeviceProp_t p{};
+  if (hipGetDeviceProperties(&p, device) != hipSuccess)
+    throw std::runtime_error("HIP device " + std::to_string(device) + " cannot be queried");
+  const std::string arch = p.gcnArchName;
+  if (arch.compare(0, 5, "gfx11") != 0)
+    throw std::runtime_error("this AMD GPU is not supported yet: " + arch + " (the native port targets RDNA3 / gfx1100 first)");
+  g_sm90.store(0);
+#else
   cudaError_t e = cudaSetDevice(device);
   if (e != cudaSuccess) throw std::runtime_error("CUDA device " + std::to_string(device) + " cannot be used (" + cuda_error(e) + ")");
   cudaDeviceProp p{};
@@ -44,6 +57,7 @@ void select_gpu(int device) {
   const int sm90 = fa.ptxVersion >= 90 ? 1 : 0;
   int cur = g_sm90.load();
   while (!g_sm90.compare_exchange_weak(cur, cur == 0 ? 0 : sm90)) {}
+#endif
 }
 
 bool gpu_sm90_features() { return g_sm90.load(std::memory_order_relaxed) == 1; }
