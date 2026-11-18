@@ -63,15 +63,22 @@ def _model_dir(args) -> Path:
 
 def _gpu_lines() -> List[str]:
     exe = gpus.smi_path()                       # nvidia-smi, or the one YASAKANI_NVIDIA_SMI names
-    if not exe:
-        return ["nvidia-smi not found (is the NVIDIA driver installed?)"]
-    try:
-        r = subprocess.run([exe, "--query-gpu=name,memory.total,memory.used,driver_version", "--format=csv,noheader"],
-                           capture_output=True, text=True, timeout=15)
-    except (OSError, subprocess.SubprocessError) as ex:
-        return ["nvidia-smi failed: " + type(ex).__name__]
-    lines = [ln.strip() for ln in r.stdout.splitlines() if ln.strip()]
-    return lines or ["nvidia-smi reported no GPU"]
+    no_smi = "nvidia-smi not found (is the NVIDIA driver installed?)"
+    if exe:
+        no_smi = "nvidia-smi reported no GPU"
+        try:
+            r = subprocess.run([exe, "--query-gpu=name,memory.total,memory.used,driver_version", "--format=csv,noheader"],
+                               capture_output=True, text=True, timeout=15)
+            lines = [ln.strip() for ln in r.stdout.splitlines() if ln.strip()]
+            if lines:
+                return lines
+        except (OSError, subprocess.SubprocessError) as ex:
+            no_smi = "nvidia-smi failed: " + type(ex).__name__
+    gs = gpus.amd_query()                       # nvidia-smi gave nothing: the HIP backend's AMD GPUs (amdgpu sysfs, no NVIDIA driver)
+    if gs:
+        return ["%s, %s MiB, %s MiB" % (g.name, g.total_mib if g.total_mib is not None else "?",
+                                        g.used_mib if g.used_mib is not None else "?") for g in gs]
+    return [no_smi]
 
 
 def _gpu_memory_warning(device: Optional[int] = 0) -> Optional[str]:
@@ -210,11 +217,13 @@ def cmd_info(args) -> int:
         ok = False
     for ln in _gpu_lines():
         print("gpu      " + ln)
-    found = gpus.query() or []
+    found = gpus.detect().gpus                  # nvidia-smi when it answers, else the amdgpu sysfs cards (the HIP backend)
     for g in found:
-        print("         GPU %d: compute capability %s - %s" % (g.index, g.cc_text, gpus.describe(g)))
+        arch = g.cc_text if g.vendor == "amd" else "compute capability " + g.cc_text
+        print("         GPU %d: %s - %s" % (g.index, arch, gpus.describe(g)))
     if len(found) > 1:
-        print("         " + gpus.numbering())
+        amd = all(g.vendor == "amd" for g in found)
+        print("         " + ("--device N is GPU N above (HIP counts in PCI bus order)" if amd else gpus.numbering()))
     d = getattr(args, "model_dir", None) or os.environ.get("YASAKANI_MODEL_DIR")
     if d:
         try:

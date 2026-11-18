@@ -844,6 +844,26 @@ class EncoderOpenTests(unittest.TestCase):
         self.assertEqual(self.names("PATH"), [str(self.d)])                # the folder leads PATH while the backends load
 
 
+class RealCpuEncoderTests(unittest.TestCase):
+    """Opt-in check of the real llama.cpp b10488 CPU encoder (no GPU needed).  Set YASAKANI_TEST_LLAMA_DIR (the shared-library
+    folder), YASAKANI_TEST_MMPROJ and YASAKANI_TEST_VISION_MODEL to run it; skipped otherwise, so the suite needs no llama.cpp
+    and no model files.  The vision-model GGUF is opened no_alloc (settings and vocabulary only), so a small quant works."""
+
+    def test_cpu_encoder_produces_features(self):
+        need_pillow()
+        keys = ("YASAKANI_TEST_LLAMA_DIR", "YASAKANI_TEST_MMPROJ", "YASAKANI_TEST_VISION_MODEL")
+        if not all(os.environ.get(k) for k in keys):
+            raise unittest.SkipTest("set %s to check the real CPU encoder" % ", ".join(keys))
+        from PIL import Image
+        enc = _REAL_ENCODER(os.environ[keys[0]], os.environ[keys[1]], os.environ[keys[2]], threads=2, max_image_tokens=256)
+        self.addCleanup(enc.close)
+        item = enc.encode(Image.new("RGB", (224, 224), (200, 30, 30)))
+        h, w, _ = validate_features(item)
+        self.assertEqual(item["features"].shape, (h * w, 5120))
+        self.assertLessEqual(h * w, 256)
+        self.assertTrue(np.any(item["features"] != 0))
+
+
 class ProjectorCheckTests(ProcessorCase):
     def check(self, mmproj=MMPROJ_KEYS, text=TEXT_KEYS):
         (self.t / "mmproj.gguf").write_bytes(gguf_bytes(mmproj))

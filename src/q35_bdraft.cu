@@ -1,5 +1,6 @@
 // SPDX-License-Identifier: Apache-2.0
 // Copyright (c) 2026 the YASAKANI authors
+#include "gpu_arch.cuh"
 #include "pdl.cuh"
 #include "q35.hpp"
 #include "smp_hash.cuh"
@@ -396,7 +397,7 @@ __global__ void __launch_bounds__(32 * DTOPK) bdr_select3_kernel(const float* __
   for (int q = threadIdx.x; q < ((2 * nj - 1) * DTOPK + 1) * (DRANK * 2 / 128); q += blockDim.x) {   
     const int row = q / (DRANK * 2 / 128), part = q % (DRANK * 2 / 128);
     const uint16_t* b = row < nj * DTOPK ? sc + (size_t)idx[row] * DRANK : pc + (size_t)(row == nj * DTOPK ? toks[0] : idx[row - nj * DTOPK - 1]) * DRANK;
-    asm volatile("prefetch.global.L1 [%0];" :: "l"(b + part * 64)); }
+    yskn::arch::prefetch_l1(b + part * 64); }
   if (threadIdx.x == 0) s_pred = toks[0];
   if (cp > 0 && threadIdx.x < nj * DTOPK) {                              
     const int jj = threadIdx.x / DTOPK; s_g[jj][threadIdx.x % DTOPK] = kh_gumbel(prm->seed, (long long)*pos + 1 + jj, idx[threadIdx.x], prm->pm); }

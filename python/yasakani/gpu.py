@@ -3,7 +3,8 @@
 """The GPU the engine runs on, and a context length that fits its memory.
 
 Since 0.1.3 the engine library is built for the RTX 30, 40 and 50 series (compute capability 8.6, 8.9 and 12.x).  It has been tested and
-tuned on the RTX 5090 only; on other cards it runs without that tuning, and its speed and operation are not guaranteed.
+tuned on the RTX 5090 only; on other cards it runs without that tuning, and its speed and operation are not guaranteed.  The HIP engine
+library (the AMD-native backend) is built for gfx1100 (RDNA3, the RX 7900 XTX) and is tested and tuned on that chip.
 
 The engine reserves the key-value cache for the whole context when the model is opened.  On a card with less memory than the RTX 5090,
 the default context of 262,144 tokens may not fit next to the model: Windows then keeps part of it in ordinary memory and generation
@@ -11,7 +12,8 @@ becomes several times slower, without an error.  :func:`plan_context` therefore 
 that fits the free GPU memory.  On cards with 30,000 MiB or more (the RTX 5090) it changes nothing: the context stays the model's own.
 
 The numbers below were measured on the RTX 5090 with the released engine (Windows, CUDA context included); on smaller cards the fixed
-part is expected to be a little smaller, so the rule errs on the safe side.  nvidia-smi is the only source: nothing here starts CUDA.
+part is expected to be a little smaller, so the rule errs on the safe side.  nvidia-smi is the source for NVIDIA cards; without it, the
+amdgpu driver's sysfs entries give the AMD cards (VRAM in bytes, no ROCm userspace needed).  Nothing here starts CUDA or HIP.
 """
 from __future__ import annotations
 
@@ -20,6 +22,7 @@ import re
 import shutil
 import subprocess
 from dataclasses import dataclass, field, replace
+from pathlib import Path
 from typing import Callable, Dict, List, Mapping, Optional, Sequence, Tuple
 
 from ._native import YasakaniError
@@ -43,7 +46,7 @@ _TESTED = re.compile(r"(^|\s)RTX 5090$")
 
 @dataclass(frozen=True)
 class GpuInfo:
-    """One row of nvidia-smi.  Values nvidia-smi could not give are None."""
+    """One row of nvidia-smi, or one amdgpu sysfs card (``vendor="amd"``).  Values the source could not give are None."""
     index: int
     name: str
     uuid: Optional[str] = None
@@ -51,6 +54,8 @@ class GpuInfo:
     total_mib: Optional[int] = None
     used_mib: Optional[int] = None
     driver: Optional[str] = None
+    vendor: str = "nvidia"
+    gfx: Optional[str] = None              # AMD: the GPU target the HIP code objects are built for (gfx1100 = RDNA3); None when unknown
 
     @property
     def free_mib(self) -> Optional[int]:
@@ -60,17 +65,27 @@ class GpuInfo:
 
     @property
     def tested(self) -> bool:
-        """The card everything is tested and tuned on: the NVIDIA GeForce RTX 5090 (32 GB)."""
+        """The card everything is tested and tuned on: the NVIDIA GeForce RTX 5090 (32 GB) for the CUDA engine, gfx1100 (the RX 7900
+        XTX) for the HIP engine (GPU-verified: selfcheck against the RTX 5090 reference)."""
+        if self.vendor == "amd":
+            return self.gfx == "gfx1100"
         return bool(_TESTED.search(self.name.strip())) and self.compute_cap in (None, (12, 0))
 
     @property
     def cc_text(self) -> str:
+        if self.vendor == "amd":
+            return self.gfx or "?"
         return "%d.%d" % self.compute_cap if self.compute_cap else "?"
 
     @property
     def arch(self) -> str:
         """"ok" (8.6 to 8.9, 12.x: the released engine has code for it), "old" (below 8.6), "no-code" (9.x to 11.x, 13 and newer)
-        or "unknown" (nvidia-smi did not tell)."""
+        or "unknown" (nvidia-smi did not tell).  AMD: "ok" for gfx1100 (the HIP engine is built for it), "no-code" for any other
+        target, "unknown" when the target could not be read."""
+        if self.vendor == "amd":
+            if self.gfx is None:
+                return "unknown"
+            return "ok" if self.gfx == "gfx1100" else "no-code"
         cc = self.compute_cap
         if cc is None:
             return "unknown"
@@ -142,11 +157,118 @@ def query(environ: Optional[Mapping[str, str]] = None, run: Callable = subproces
     return None
 
 
+# ---- AMD (the HIP backend): amdgpu sysfs, rocm-smi only for the name and the gfx target -------------------------------------------
+AMD_VENDOR = 0x1002
+# Navi 31 PCI device id -> (gfx target, card name): the fallback when rocm-smi is not installed.  Only the chip the HIP backend is
+# built and GPU-verified for is listed; extend it when other targets are verified, do not guess untested chips.
+_AMD_PCI = {0x744C: ("gfx1100", "AMD Radeon RX 7900 XTX")}
+
+
+def _sysfs_read(p: Path) -> Optional[str]:
+    try:
+        return p.read_text(encoding="utf-8").strip()
+    except (OSError, ValueError):
+        return None
+
+
+def _mib(s: Optional[str]) -> Optional[int]:
+    """sysfs reports VRAM in bytes; the plan works in MiB (floor: the safe side)."""
+    try:
+        return int(s) // MIB
+    except (TypeError, ValueError):
+        return None
+
+
+def _rocm_smi_path(environ: Optional[Mapping[str, str]] = None) -> Optional[str]:
+    """The rocm-smi to ask (optional: sysfs alone gives vendor and VRAM).  ``YASAKANI_ROCM_SMI`` names another one; ``none`` (or
+    empty) skips it, like ``YASAKANI_NVIDIA_SMI`` does for nvidia-smi."""
+    env = os.environ if environ is None else environ
+    if "YASAKANI_ROCM_SMI" in env:
+        p = env["YASAKANI_ROCM_SMI"].strip()
+        return p if p and p.lower() != "none" else None
+    return shutil.which("rocm-smi")
+
+
+def _rocm_smi_rows(environ: Mapping[str, str], run: Callable, timeout: float) -> List[Tuple[Optional[str], Optional[str]]]:
+    """(Card Series, GFX Version) per AMD GPU from ``rocm-smi --showproductname --csv``, in its device order; [] when it cannot be
+    asked or its answer is not understood.  rocm-smi prints warnings (and, without /dev/kfd, an amdgpu init error) before the CSV:
+    the header line starts with ``device,``.  It works from sysfs alone, so no GPU access is needed here."""
+    exe = _rocm_smi_path(environ)
+    if not exe:
+        return []
+    try:
+        r = run([exe, "--showproductname", "--csv"], capture_output=True, text=True, timeout=timeout)
+    except (OSError, subprocess.SubprocessError, ValueError):
+        return []
+    if r.returncode != 0:
+        return []
+    lines = (r.stdout or "").splitlines()
+    head = next((i for i, ln in enumerate(lines) if ln.startswith("device,")), None)
+    if head is None:
+        return []
+    cols = [c.strip() for c in lines[head].split(",")]
+    if "Card Series" not in cols or "GFX Version" not in cols:
+        return []
+    i_series, i_gfx = cols.index("Card Series"), cols.index("GFX Version")
+    out = []
+    for ln in lines[head + 1:]:
+        parts = [c.strip() for c in ln.split(",")]
+        if len(parts) == len(cols):
+            out.append((_value(parts[i_series]), _value(parts[i_gfx])))
+    return out
+
+
+def amd_query(environ: Optional[Mapping[str, str]] = None, run: Callable = subprocess.run, sysfs: Optional[str] = None,
+              timeout: float = 15) -> List[GpuInfo]:
+    """AMD GPUs from the amdgpu driver's sysfs entries: vendor 0x1002, VRAM total/used in bytes -> MiB.  No NVIDIA driver and no
+    ROCm userspace are needed (the HIP engine only requires the amdgpu kernel driver).  Cards are numbered in PCI bus order, the
+    order HIP enumerates devices in (sysfs cardN is probe order, not PCI order).  rocm-smi, when installed, adds the gfx target and
+    the card name; without it the PCI device id gives them for the verified chip.  ``YASAKANI_AMD_SYSFS`` names another sysfs root
+    (tests).  Never raises."""
+    env = os.environ if environ is None else environ
+    root = Path(sysfs or env.get("YASAKANI_AMD_SYSFS") or "/sys/class/drm")
+    cards = []
+    for d in root.glob("card*/device"):
+        if not re.fullmatch(r"card\d+", d.parent.name):      # connectors (card1-DP-1) point at the same device: skip them
+            continue
+        vendor = _sysfs_read(d / "vendor")
+        try:
+            if vendor is None or int(vendor, 16) != AMD_VENDOR:
+                continue
+        except ValueError:
+            continue
+        cards.append(d)
+    cards.sort(key=lambda d: d.resolve().name)               # the PCI address (0000:03:00.0): HIP's device order
+    smi = _rocm_smi_rows(env, run, timeout) if cards else []
+    match = len(smi) == len(cards)                           # rocm-smi lists the AMD GPUs in the same PCI order; else no enrichment
+    out = []
+    for i, d in enumerate(cards):
+        dev = _sysfs_read(d / "device")
+        try:
+            dev_id = int(dev, 16) if dev else None
+        except ValueError:
+            dev_id = None
+        gfx, name = _AMD_PCI.get(dev_id, (None, None))
+        if match:
+            gfx, name = smi[i][1] or gfx, smi[i][0] or name
+        out.append(GpuInfo(index=i, name=name or ("AMD GPU 0x%04x" % dev_id if dev_id is not None else "AMD GPU"),
+                           total_mib=_mib(_sysfs_read(d / "mem_info_vram_total")), used_mib=_mib(_sysfs_read(d / "mem_info_vram_used")),
+                           vendor="amd", gfx=gfx))
+    return out
+
+
+def _nvidia_opted_out(env: Mapping[str, str]) -> bool:
+    """``YASAKANI_NVIDIA_SMI=none`` (or empty) means "ask nothing" (the 0.1.3 semantics): the AMD fallback is skipped too."""
+    v = env.get("YASAKANI_NVIDIA_SMI")
+    return v is not None and (not v.strip() or v.strip().lower() == "none")
+
+
 @dataclass
 class Detected:
     """What is known about the GPU the engine will use.  ``candidates`` has one entry when it is known which GPU that is, several when
     the PC has more than one and CUDA's numbering cannot be matched with nvidia-smi's, and none when nothing is known.  ``numbered`` is
-    True when CUDA's device numbers are nvidia-smi's indexes (one GPU, or PCI bus order without ``CUDA_VISIBLE_DEVICES``)."""
+    True when CUDA's device numbers are nvidia-smi's indexes (one GPU, or PCI bus order without ``CUDA_VISIBLE_DEVICES``); AMD (HIP)
+    devices are always counted in PCI bus order."""
     gpus: List[GpuInfo] = field(default_factory=list)
     candidates: List[GpuInfo] = field(default_factory=list)
     device: int = 0
@@ -202,11 +324,15 @@ def numbering(environ: Optional[Mapping[str, str]] = None) -> str:
 def select(gpus: Sequence[GpuInfo], device: int = 0, environ: Optional[Mapping[str, str]] = None) -> List[GpuInfo]:
     """The GPU(s) that CUDA device ``device`` can be.  nvidia-smi numbers GPUs in PCI order; CUDA does too only with
     ``CUDA_DEVICE_ORDER=PCI_BUS_ID`` (its default puts the fastest first; since 0.1.5 the package sets PCI_BUS_ID when it is not set,
-    :func:`yasakani._native.pci_bus_order`), and ``CUDA_VISIBLE_DEVICES`` renumbers them."""
+    :func:`yasakani._native.pci_bus_order`), and ``CUDA_VISIBLE_DEVICES`` renumbers them.  AMD: HIP numbers devices in PCI bus order
+    (its default) and does not read CUDA's variables, so ``device`` indexes the list directly."""
     env = os.environ if environ is None else environ
     gpus = list(gpus)
     if not gpus or device < 0:
         return []
+    if all(g.vendor == "amd" for g in gpus):
+        # ponytail: HIP_VISIBLE_DEVICES / ROCR_VISIBLE_DEVICES renumbering is not matched yet (single-GPU target); add when needed
+        return [gpus[device]] if device < len(gpus) else []
     pci_order = _pci_order(env)
     if "CUDA_VISIBLE_DEVICES" in env:
         entries = [e.strip() for e in (env.get("CUDA_VISIBLE_DEVICES") or "").split(",") if e.strip()]
@@ -227,17 +353,33 @@ def select(gpus: Sequence[GpuInfo], device: int = 0, environ: Optional[Mapping[s
 
 
 def detect(device: int = 0, environ: Optional[Mapping[str, str]] = None, gpus: Optional[Sequence[GpuInfo]] = None,
-           run: Callable = subprocess.run) -> Detected:
-    """Ask nvidia-smi once (unless ``gpus`` is given) and match CUDA device ``device``.  Never raises."""
-    if gpus is None:
-        gpus = query(environ, run=run) or []
+           run: Callable = subprocess.run, sysfs: Optional[str] = None) -> Detected:
+    """Ask nvidia-smi once (unless ``gpus`` is given) and match CUDA device ``device``; when nvidia-smi gives nothing, ask the amdgpu
+    sysfs entries instead (the HIP backend needs no NVIDIA driver).  ``YASAKANI_NVIDIA_SMI=none`` opts out of both.  Never raises."""
     env = os.environ if environ is None else environ
-    numbered = bool(gpus) and "CUDA_VISIBLE_DEVICES" not in env and (len(gpus) == 1 or _pci_order(env))
-    return Detected(gpus=list(gpus), candidates=select(gpus, device, environ), device=device, numbered=numbered)
+    if gpus is None:
+        gpus = query(environ, run=run)
+        if not gpus and not _nvidia_opted_out(env):
+            gpus = amd_query(environ, run=run, sysfs=sysfs)
+        gpus = gpus or []
+    gpus = list(gpus)
+    amd = bool(gpus) and all(g.vendor == "amd" for g in gpus)
+    numbered = bool(gpus) and (amd or ("CUDA_VISIBLE_DEVICES" not in env and (len(gpus) == 1 or _pci_order(env))))
+    return Detected(gpus=gpus, candidates=select(gpus, device, environ), device=device, numbered=numbered)
 
 
 def describe(g: GpuInfo) -> str:
     """One line on what 0.1.3 does on this GPU."""
+    if g.vendor == "amd":
+        if g.tested:
+            return "the chip the HIP backend is tested and tuned on (RX 7900 XTX, RDNA3)"
+        if g.arch == "no-code":
+            return "%s: the HIP engine is built for gfx1100 only" % g.cc_text
+        if g.total_mib is not None and g.total_mib < MIN_TOTAL_MIB:
+            return "%d MiB: too small, the released models need a 16 GB card" % g.total_mib
+        small = g.total_mib is not None and g.total_mib < QUALITY_MIN_TOTAL_MIB
+        return ("runs with the HIP backend, but not optimized or tested (only gfx1100 is); speed and operation are not guaranteed"
+                + ("; fastest model only" if small else ""))
     if g.tested:
         return "RTX 5090: the card YASAKANI is tested and tuned on"
     if g.arch == "old":
@@ -252,10 +394,17 @@ def describe(g: GpuInfo) -> str:
 
 
 def untested_note(det: Detected) -> Optional[str]:
-    """The line printed at start on any GPU that is not the RTX 5090."""
+    """The line printed at start on any GPU that is not the tested one (the RTX 5090 for CUDA, gfx1100 for HIP)."""
     if not det.untested:
         return None
     g = det.gpu
+    if all(x.vendor == "amd" for x in det.candidates):
+        what = "%s (%s)" % (g.name, g.cc_text) if g else "this PC's GPUs (%s)" % ", ".join(sorted({x.name for x in det.candidates}))
+        note = ("note: %s - the HIP backend runs on it, but it is not optimized or tested there (it is tested on gfx1100, the RX 7900 "
+                "XTX, only); speed and operation are not guaranteed." % what)
+        if g and g.arch == "no-code":
+            note += "  The HIP engine is built for gfx1100, so it will probably not start."
+        return note
     what = "%s (compute capability %s)" % (g.name, g.cc_text) if g else "this PC's GPUs (%s)" % ", ".join(sorted({x.name for x in det.candidates}))
     note = ("note: %s - YASAKANI runs on it since 0.1.3, but it is not optimized or tested there (it is tested on the RTX 5090 only); "
             "speed and operation are not guaranteed." % what)

@@ -18,6 +18,9 @@
 #include "q35.hpp"
 #include "args.hpp"
 #include "q35_g6.hpp"
+#if defined(YSKN_HIP_PREFILL_GEMM)
+#include "../backends/hip/prefill/hip_prefill.hpp"
+#endif
 namespace yskn {
 struct Shared35Weights;
 struct Q35Layer {
@@ -265,8 +268,11 @@ private:
   int pfa_ = 1, pfa_wpc_ = 0;   
   int nwk(const DevTensor& t, int M) const { return (pfa_ && M > Mmax_) ? 1 : t.dev.n_workers; }   
   int xsm_ = 1;          
-  Q35G6Workspace g6_; 
-  bool xsmc_ = false;    
+  Q35G6Workspace g6_;
+#if defined(YSKN_HIP_PREFILL_GEMM)
+  HipPrefillWorkspace hip_pf_;   // AMD-native prefill GEMM (hipBLAS int8 per-group), env YSKN_HIP_PREFILL
+#endif
+  bool xsmc_ = false;
   float *us_ = nullptr, *S_ = nullptr, *mtp_part_ = nullptr;   
   float* ybuf_ = nullptr;  
   float* pt(const DevTensor& t, int M) const { return (xsmc_ && M > xw_rows_) ? ybuf_ + (t.part - part_) : t.part; }
@@ -287,6 +293,9 @@ private:
   void head_wide(int M, bool topk, bool nll);
 public:
   int test_xsum(const std::string& name, int M, unsigned seed, int variant, long long* out4);   // compare with 16-row launches
+#if defined(YSKN_HIP_PREFILL_GEMM)
+  int test_hip_prefill(const std::string& name, int M, unsigned seed, long long* out4);   // hipBLAS prefill GEMM vs 16-row lnord, bit-exact float-y
+#endif
 private:
   void gemv(std::initializer_list<DevTensor*> ts, int M, bool normed, const GemvLaunch* fin = nullptr);   
   

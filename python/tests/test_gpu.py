@@ -2,7 +2,8 @@
 """0.1.3: which GPU, what 0.1.3 does on it, and the context that fits its memory (yasakani/gpu.py and the quickstart's copy of the rule).
 
 nvidia-smi is never run for real here: its output is given as text, or a stand-in program prints it.  The memory sizes of the cards are
-what nvidia-smi reports for them (MiB); the rule's numbers are those of the published model files.
+what nvidia-smi reports for them (MiB); the rule's numbers are those of the published model files.  The AMD tests (the HIP backend)
+work the same way: a fake /sys/class/drm tree and rocm-smi CSV given as text, never a real GPU.
 """
 import importlib.util
 import json
@@ -705,6 +706,344 @@ class OpenStackTests(unittest.TestCase):
                 self.assertEqual(os.environ["YSKN_BDR_SHEAD"], head)
             finally:
                 eng.close()
+
+
+# ---- AMD (the HIP backend): a fake amdgpu sysfs tree and rocm-smi CSV, never a real GPU -------------------------------------------
+AMD_TOTAL_MIB = 24560                     # RX 7900 XTX: sysfs mem_info_vram_total = 25753026560 bytes
+AMD_USED_MIB = 1361                       # the desktop: mem_info_vram_used = 1427345408 bytes
+RX7900XTX = (1, "0000:03:00.0", "0x1002", "0x744c", AMD_TOTAL_MIB * G.MIB, AMD_USED_MIB * G.MIB)
+# no nvidia-smi (a path that cannot run: query() gives None on any machine) and no rocm-smi: the sysfs/PCI-id fallback alone
+NO_SMI_ENV = {"YASAKANI_NVIDIA_SMI": "/nonexistent/nvidia-smi", "YASAKANI_ROCM_SMI": "none"}
+ROCM_CSV = ("WARNING: AMD GPU device(s) is/are in a low-power state. Check power control/runtime_status\n\n"
+            "_amdgpu_device_initialize: amdgpu_get_auth (1) failed (-1)\n"
+            "device,Card Series,Card Model,Card Vendor,Card SKU,Subsystem ID,Device Rev,Node ID,GUID,GFX Version\n"
+            "card0,%s,0x744c,Advanced Micro Devices Inc. [AMD/ATI],D7020100,0x0e3b,0xc8,1,60133,%s\n")
+
+
+def _no_smi(cmd, **kw):
+    raise FileNotFoundError(cmd[0])
+
+
+def make_sysfs(root, cards):
+    """A fake /sys/class/drm: (card number, PCI address, vendor, device id, VRAM total bytes, VRAM used bytes); None leaves a file
+    out.  cardN/device is a symlink to the PCI device, as in the real sysfs (cardN is probe order; the PCI address is the bus order)."""
+    for n, bdf, vendor, dev, total, used in cards:
+        pci = root / "devices" / bdf
+        pci.mkdir(parents=True, exist_ok=True)
+        for name, val in (("vendor", vendor), ("device", dev), ("mem_info_vram_total", total), ("mem_info_vram_used", used)):
+            if val is not None:
+                (pci / name).write_text(str(val))
+        card = root / ("card%d" % n)
+        card.mkdir(exist_ok=True)
+        link = card / "device"
+        if link.is_symlink():
+            link.unlink()
+        link.symlink_to(pci)
+    return root
+
+
+def amd_det(root, cards=(RX7900XTX,), device=0, environ=None):
+    make_sysfs(root, cards)
+    return G.detect(device, environ=dict(NO_SMI_ENV, **(environ or {})), sysfs=str(root), run=_no_smi)
+
+
+class AmdSysfsTests(unittest.TestCase):
+    def setUp(self):
+        self.root = Path(tempfile.mkdtemp(prefix="fake_sysfs_"))
+        self.addCleanup(shutil.rmtree, self.root, True)
+
+    def query(self, environ=None, run=_no_smi):
+        return G.amd_query(dict(NO_SMI_ENV, **(environ or {})), run=run, sysfs=str(self.root))
+
+    def test_card(self):
+        make_sysfs(self.root, [RX7900XTX])
+        gs = self.query()
+        self.assertEqual(len(gs), 1)
+        g = gs[0]
+        self.assertEqual((g.index, g.name, g.vendor, g.gfx), (0, "AMD Radeon RX 7900 XTX", "amd", "gfx1100"))
+        self.assertEqual((g.total_mib, g.used_mib, g.free_mib), (24560, 1361, 23199))      # bytes -> MiB
+        self.assertEqual((g.compute_cap, g.uuid, g.driver), (None, None, None))
+        self.assertEqual((g.cc_text, g.arch, g.tested), ("gfx1100", "ok", True))
+
+    def test_pci_order_and_vendor_filter(self):
+        make_sysfs(self.root, [(5, "0000:83:00.0", "0x1002", "0x744c", AMD_TOTAL_MIB * G.MIB, 100 * G.MIB),
+                               (2, "0000:03:00.0", "0x1002", "0x744c", 16384 * G.MIB, 0),
+                               (0, "0000:00:02.0", "0x8086", "0x9a49", 0, 0),               # the Intel iGPU: not AMD
+                               (7, "0000:84:00.0", "0x10de", "0x2684", 24564 * G.MIB, 0)])  # an NVIDIA card: not AMD
+        conn = self.root / "card5-DP-1"                                                    # a connector points at the same device
+        conn.mkdir()
+        (conn / "device").symlink_to(self.root / "devices" / "0000:83:00.0")
+        gs = self.query()
+        self.assertEqual(len(gs), 2)                                                       # the connector is not a second card
+        self.assertEqual((gs[0].index, gs[0].total_mib), (0, 16384))                       # PCI order, not cardN (probe) order
+        self.assertEqual((gs[1].index, gs[1].total_mib), (1, 24560))
+
+    def test_missing_files(self):
+        make_sysfs(self.root, [(1, "0000:03:00.0", "0x1002", None, None, None),
+                               (2, "0000:04:00.0", None, "0x744c", AMD_TOTAL_MIB * G.MIB, 0)])
+        gs = self.query()
+        self.assertEqual(len(gs), 1)                                                       # no vendor file: not known to be AMD
+        g = gs[0]
+        self.assertEqual((g.total_mib, g.used_mib, g.free_mib), (None, None, None))
+        self.assertEqual((g.gfx, g.arch, g.tested, g.name), (None, "unknown", False, "AMD GPU"))
+
+    def test_empty(self):
+        self.assertEqual(self.query(), [])
+        self.assertEqual(G.amd_query(NO_SMI_ENV, run=_no_smi, sysfs=str(self.root / "missing")), [])
+
+    def test_rocm_smi(self):
+        make_sysfs(self.root, [RX7900XTX])
+
+        def run(cmd, **kw):
+            if cmd[0] == "/x/rocm-smi":
+                return subprocess.CompletedProcess(cmd, 0, stdout=ROCM_CSV % ("AMD Radeon RX 7900 XTX", "gfx1100"), stderr="")
+            raise FileNotFoundError(cmd[0])
+        g = self.query({"YASAKANI_ROCM_SMI": "/x/rocm-smi"}, run)[0]
+        self.assertEqual((g.name, g.gfx, g.total_mib), ("AMD Radeon RX 7900 XTX", "gfx1100", 24560))
+
+        def run_na(cmd, **kw):                                                             # Card Series N/A: the PCI-id name
+            if cmd[0] == "/x/rocm-smi":
+                return subprocess.CompletedProcess(cmd, 0, stdout=ROCM_CSV % ("N/A", "gfx1100"), stderr="")
+            raise FileNotFoundError(cmd[0])
+        g = self.query({"YASAKANI_ROCM_SMI": "/x/rocm-smi"}, run_na)[0]
+        self.assertEqual((g.name, g.gfx), ("AMD Radeon RX 7900 XTX", "gfx1100"))
+
+    def test_rocm_smi_unknown_device(self):
+        make_sysfs(self.root, [(1, "0000:03:00.0", "0x1002", "0x9999", AMD_TOTAL_MIB * G.MIB, 0)])
+
+        def run(cmd, **kw):
+            if cmd[0] == "/x/rocm-smi":
+                return subprocess.CompletedProcess(cmd, 0, stdout=ROCM_CSV % ("N/A", "gfx1100"), stderr="")
+            raise FileNotFoundError(cmd[0])
+        g = self.query({"YASAKANI_ROCM_SMI": "/x/rocm-smi"}, run)[0]
+        self.assertEqual((g.name, g.gfx), ("AMD GPU 0x9999", "gfx1100"))                   # the gfx target from rocm-smi
+        g = self.query()[0]                                                                # without rocm-smi: an unlisted chip
+        self.assertEqual((g.name, g.gfx, g.arch, g.tested), ("AMD GPU 0x9999", None, "unknown", False))
+
+    def test_rocm_smi_count_mismatch(self):
+        make_sysfs(self.root, [RX7900XTX, (2, "0000:83:00.0", "0x1002", "0x744c", 16384 * G.MIB, 0)])
+
+        def run(cmd, **kw):                                                                # one row for two cards: no enrichment
+            if cmd[0] == "/x/rocm-smi":
+                return subprocess.CompletedProcess(cmd, 0, stdout=ROCM_CSV % ("Some Other Card", "gfx900"), stderr="")
+            raise FileNotFoundError(cmd[0])
+        gs = self.query({"YASAKANI_ROCM_SMI": "/x/rocm-smi"}, run)
+        self.assertEqual([(g.name, g.gfx) for g in gs], [("AMD Radeon RX 7900 XTX", "gfx1100")] * 2)
+
+    def test_rocm_smi_failure(self):
+        make_sysfs(self.root, [RX7900XTX])
+
+        def boom(cmd, **kw):
+            raise OSError(cmd[0])
+        for run in (boom,
+                    lambda cmd, **kw: subprocess.CompletedProcess(cmd, 1, stdout="", stderr=""),
+                    lambda cmd, **kw: subprocess.CompletedProcess(cmd, 0, stdout="not a csv\n", stderr="")):
+            g = self.query({"YASAKANI_ROCM_SMI": "/x/rocm-smi"}, run)[0]
+            self.assertEqual((g.name, g.gfx, g.total_mib), ("AMD Radeon RX 7900 XTX", "gfx1100", 24560))
+
+    def test_detect_fallback(self):
+        det = amd_det(self.root)
+        self.assertTrue(det.known)
+        self.assertTrue(det.tested)
+        self.assertTrue(det.numbered)                                                      # HIP counts in PCI order
+        self.assertEqual((det.device, det.gpu.name, det.gpu.free_mib), (0, "AMD Radeon RX 7900 XTX", 23199))
+        self.assertIsNone(G.untested_note(det))
+
+    def test_detect_nvidia_wins(self):
+        make_sysfs(self.root, [RX7900XTX])
+
+        def run(cmd, **kw):
+            if cmd[0] == "/x/nvidia-smi":
+                return subprocess.CompletedProcess(cmd, 0, stdout=smi_line(0, "NVIDIA GeForce RTX 5090", "12.0", 32607) + "\n", stderr="")
+            raise FileNotFoundError(cmd[0])
+        det = G.detect(0, environ={"YASAKANI_NVIDIA_SMI": "/x/nvidia-smi", "YASAKANI_ROCM_SMI": "none"}, run=run, sysfs=str(self.root))
+        self.assertEqual((det.gpu.vendor, det.gpu.name), ("nvidia", "NVIDIA GeForce RTX 5090"))   # the CUDA path is unchanged
+
+    def test_detect_opt_out(self):
+        for v in ("none", ""):                                                             # 0.1.3: "ask nothing" skips AMD too
+            det = amd_det(self.root, environ={"YASAKANI_NVIDIA_SMI": v})
+            self.assertFalse(det.known)
+
+    def test_detect_gpus_given(self):
+        def never(cmd, **kw):
+            raise AssertionError("unexpected subprocess: %r" % (cmd,))
+        g = G.GpuInfo(index=0, name="AMD Radeon RX 7900 XTX", total_mib=24560, used_mib=1361, vendor="amd", gfx="gfx1100")
+        det = G.detect(0, environ={}, gpus=[g], run=never)
+        self.assertTrue(det.tested)
+
+
+class AmdDecisionTests(unittest.TestCase):
+    def gpu(self, gfx="gfx1100", total=24560):
+        return G.GpuInfo(index=0, name="AMD Radeon RX 7900 XTX", total_mib=total, used_mib=1361, vendor="amd", gfx=gfx)
+
+    def det(self, g):
+        return G.detect(0, environ={}, gpus=[g])
+
+    def test_gfx1100_tested(self):
+        g = self.gpu()
+        self.assertTrue(g.tested)
+        self.assertIn("tested and tuned", G.describe(g))
+        self.assertIsNone(G.untested_note(self.det(g)))
+
+    def test_other_gfx_no_code(self):
+        g = self.gpu("gfx1101")
+        self.assertEqual((g.tested, g.arch, g.cc_text), (False, "no-code", "gfx1101"))
+        self.assertIn("built for gfx1100 only", G.describe(g))
+        note = G.untested_note(self.det(g))
+        self.assertIn("not optimized or tested there", note)
+        self.assertIn("will probably not start", note)
+
+    def test_unknown_gfx(self):
+        g = self.gpu(None)
+        self.assertEqual((g.tested, g.arch, g.cc_text), (False, "unknown", "?"))
+        note = G.untested_note(self.det(g))
+        self.assertIn("not optimized or tested there", note)
+        self.assertNotIn("probably not start", note)
+        self.assertIn("fastest model only", G.describe(self.gpu(None, 16384)))
+        self.assertIn("too small", G.describe(self.gpu(None, 8192)))
+
+
+class AmdSelectTests(unittest.TestCase):
+    def setUp(self):
+        self.root = Path(tempfile.mkdtemp(prefix="fake_sysfs_"))
+        self.addCleanup(shutil.rmtree, self.root, True)
+
+    def test_one_gpu(self):
+        det = amd_det(self.root)
+        gs = det.gpus
+        self.assertEqual(G.select(gs, 0, {}), gs)
+        self.assertEqual(G.select(gs, 1, {}), [])
+        self.assertEqual(G.select(gs, 0, {"CUDA_VISIBLE_DEVICES": "1"}), gs)               # HIP does not read CUDA's variables
+        self.assertEqual(G.select(gs, 0, {"CUDA_DEVICE_ORDER": "FASTEST_FIRST"}), gs)
+
+    def test_two_gpus(self):
+        cards = (RX7900XTX, (2, "0000:83:00.0", "0x1002", "0x744c", 16384 * G.MIB, 0))
+        det = amd_det(self.root, cards)
+        self.assertTrue(det.numbered)
+        self.assertEqual(G.select(det.gpus, 1, {})[0].total_mib, 16384)                    # --device N is GPU N (PCI order)
+        self.assertEqual(G.select(det.gpus, 2, {}), [])
+        self.assertEqual(amd_det(self.root, cards, device=1).gpu.total_mib, 16384)
+        self.assertEqual(amd_det(self.root, cards, device=0, environ={"CUDA_VISIBLE_DEVICES": "1"}).gpu.total_mib, 24560)
+
+
+class AmdPlanTests(unittest.TestCase):
+    """The context rule with AMD VRAM: the same numbers as on a 24 GB NVIDIA card (the rule is vendor-neutral)."""
+
+    def setUp(self):
+        self.root = Path(tempfile.mkdtemp(prefix="fake_sysfs_"))
+        self.addCleanup(shutil.rmtree, self.root, True)
+
+    def det(self, total=AMD_TOTAL_MIB, used=AMD_USED_MIB):
+        return amd_det(self.root, [(1, "0000:03:00.0", "0x1002", "0x744c", total * G.MIB, used * G.MIB)])
+
+    def test_24gb_full_context(self):
+        for sizes in (FASTEST, QUALITY):                                                   # 23,199 MiB free: both fit at 262,144
+            plan = G.plan_context(FakePack(sizes), self.det())
+            self.assertEqual((plan.max_ctx, plan.env, plan.notes), (None, {}, []))
+
+    def test_24gb_less_free(self):
+        plan = G.plan_context(FakePack(QUALITY), self.det(used=3996))                      # 20,564 MiB free, as the RTX 4090 test
+        self.assertEqual((plan.max_ctx, plan.env), (163840, {}))
+
+    def test_16gb(self):
+        plan = G.plan_context(FakePack(FASTEST), self.det(total=16384, used=1000))
+        self.assertEqual((plan.max_ctx, plan.env), (81920, {"YSKN_BDR_SHEAD": "0"}))
+
+    def test_does_not_fit(self):
+        with self.assertRaises(YasakaniError) as cm:
+            G.plan_context(FakePack(FASTEST), self.det(total=8192, used=300))
+        self.assertIn("does not fit", str(cm.exception))
+        self.assertIn("(7892 of 8192 MiB free", str(cm.exception))
+
+    def test_given_context(self):
+        plan = G.plan_given_context(FakePack(FASTEST), self.det(), 131072)                 # 128K: the verified HIP context
+        self.assertEqual((plan.max_ctx, plan.env, plan.notes), (131072, {}, []))
+        self.assertEqual(G.plan_given_context(FakePack(QUALITY), self.det(), 262144).env, {})
+        plan = G.plan_given_context(FakePack(FASTEST), self.det(used=20000), 262144)       # 4,560 MiB free: the head is left out
+        self.assertEqual((plan.max_ctx, plan.env), (262144, {"YSKN_BDR_SHEAD": "0"}))
+        self.assertIn("bdraft2_k8.shead", plan.notes[0])
+
+    def test_unknown_or_big_memory(self):
+        make_sysfs(self.root, [(1, "0000:03:00.0", "0x1002", "0x744c", None, None)])
+        det = G.detect(0, environ=NO_SMI_ENV, sysfs=str(self.root), run=_no_smi)
+        self.assertEqual(G.plan_context(FakePack(FASTEST), det).max_ctx, None)             # unknown: unchanged
+        self.assertEqual(G.plan_given_context(FakePack(FASTEST), det, 262144).env, {})
+        self.assertEqual(G.plan_context(FakePack(QUALITY), self.det(total=32768)).max_ctx, None)   # 30,000 MiB or more: unchanged
+
+
+@unittest.skipUnless(support.tokenizer_dir() is not None and os.name == "posix",
+                     "needs the Qwen3.8 tokenizer files (YASAKANI_TEST_MODEL_DIR) and a POSIX test machine")
+class CliAmdTests(unittest.TestCase):
+    """The command line with a fake amdgpu sysfs tree and the stub engine library (the HIP path, no NVIDIA driver)."""
+
+    @classmethod
+    def setUpClass(cls):
+        cls.dll = str(support.stub_path())
+        cls.folder = support.make_real_folder("amd")
+        cls.addClassCleanup(shutil.rmtree, cls.folder.parent, True)
+        with open(cls.folder / "bdraft2_k8.shead", "wb") as f:                # a sparse file of the published size: the rule sees it
+            f.truncate(FASTEST[2])
+        cls.sysfs = Path(tempfile.mkdtemp(prefix="fake_sysfs_cli_"))
+        cls.addClassCleanup(shutil.rmtree, cls.sysfs, True)
+
+    def set_vram(self, total=AMD_TOTAL_MIB, used=AMD_USED_MIB, dev="0x744c"):
+        make_sysfs(self.sysfs, [(1, "0000:03:00.0", "0x1002", dev, total * G.MIB, used * G.MIB)])
+
+    def run_cli(self, *args, timeout=60):
+        env = dict(os.environ, PYTHONPATH=str(ROOT), PYTHONUNBUFFERED="1", YASAKANI_AMD_SYSFS=str(self.sysfs), **NO_SMI_ENV)
+        for k in [k for k in env if k.startswith(("YSKN_", "STUB_"))] + ["YASAKANI_DLL", "YASAKANI_MODEL_DIR", "CUDA_VISIBLE_DEVICES", "CUDA_DEVICE_ORDER"]:
+            env.pop(k, None)
+        return subprocess.run([sys.executable, "-m", "yasakani", *args], capture_output=True, text=True, timeout=timeout, cwd=str(ROOT),
+                              env=env, input="/exit\n")
+
+    def common(self):
+        return ["--model-dir", str(self.folder), "--dll", self.dll]
+
+    def test_info(self):
+        self.set_vram()
+        r = self.run_cli("info", *self.common())
+        self.assertEqual(r.returncode, 0, r.stdout + r.stderr)
+        self.assertIn("AMD Radeon RX 7900 XTX, 24560 MiB, 1361 MiB", r.stdout)
+        self.assertIn("GPU 0: gfx1100 - the chip the HIP backend is tested and tuned on", r.stdout)
+
+    def test_chat_full_context(self):
+        self.set_vram()
+        r = self.run_cli("chat", *self.common(), "--no-think")
+        self.assertEqual(r.returncode, 0, r.stderr)
+        self.assertIn("(context 262144 tokens)", r.stderr)
+        self.assertNotIn("note:", r.stderr)                                                # gfx1100 is the tested chip
+        self.assertNotIn("context: ", r.stderr)
+
+    def test_chat_context_and_note(self):
+        self.set_vram(used=AMD_TOTAL_MIB - 4958)                                           # about 4,958 MiB free beside the weights
+        r = self.run_cli("chat", *self.common(), "--no-think")
+        self.assertEqual(r.returncode, 0, r.stderr)
+        self.assertIn("bdraft2_k8.shead", r.stderr)
+        self.assertIn("context: 98304 tokens", r.stderr)
+        self.assertIn("(context 98304 tokens)", r.stderr)
+        self.assertNotIn("not optimized", r.stderr)
+
+    def test_does_not_fit(self):
+        self.set_vram(used=AMD_TOTAL_MIB - 2000)
+        r = self.run_cli("chat", *self.common())
+        self.assertEqual(r.returncode, 1)
+        self.assertIn("does not fit in the free GPU memory", r.stderr)
+        self.assertNotIn("loading the model", r.stderr)
+
+    def test_given_context(self):
+        self.set_vram()
+        r = self.run_cli("chat", *self.common(), "--no-think", "--max-ctx", "131072")
+        self.assertEqual(r.returncode, 0, r.stderr)
+        self.assertIn("(context 131072 tokens)", r.stderr)
+        self.assertNotIn("context: ", r.stderr)
+
+    def test_untested_card(self):
+        self.set_vram(dev="0x9999")                                                        # a chip the fallback does not know
+        r = self.run_cli("chat", *self.common(), "--no-think")
+        self.assertEqual(r.returncode, 0, r.stderr)
+        self.assertIn("the HIP backend runs on it, but it is not optimized or tested there", r.stderr)
+        r = self.run_cli("info", *self.common())
+        self.assertIn("GPU 0: ? - runs with the HIP backend", r.stdout)
 
 
 if __name__ == "__main__":

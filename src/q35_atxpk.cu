@@ -1,5 +1,6 @@
 // SPDX-License-Identifier: Apache-2.0
 // Copyright (c) 2026 the YASAKANI authors
+#include "gpu_arch.cuh"
 #include "pdl.cuh"
 #include <cuda_bf16.h>
 #include <cuda_fp16.h>
@@ -32,26 +33,13 @@ namespace yskn {
 namespace {
 constexpr int PK_KT = 32, PK_LD = Q35_HD + 8, PK_ROW = 128, PK_REC = 2048;   
 constexpr float PK_LOG2E = 1.4426950408889634f;
-__device__ __forceinline__ void pk_mma(float* c, const unsigned* a, unsigned b0, unsigned b1) {
-  asm volatile("mma.sync.aligned.m16n8k16.row.col.f32.bf16.bf16.f32 {%0,%1,%2,%3}, {%4,%5,%6,%7}, {%8,%9}, {%0,%1,%2,%3};\n"
-               : "+f"(c[0]), "+f"(c[1]), "+f"(c[2]), "+f"(c[3]) : "r"(a[0]), "r"(a[1]), "r"(a[2]), "r"(a[3]), "r"(b0), "r"(b1));
-}
-__device__ __forceinline__ void pk_ldm4(unsigned* r, const void* p) {
-  const unsigned s = (unsigned)__cvta_generic_to_shared(p);
-  asm volatile("ldmatrix.sync.aligned.m8n8.x4.shared.b16 {%0,%1,%2,%3}, [%4];\n" : "=r"(r[0]), "=r"(r[1]), "=r"(r[2]), "=r"(r[3]) : "r"(s));
-}
-__device__ __forceinline__ void pk_ldm4t(unsigned* r, const void* p) {
-  const unsigned s = (unsigned)__cvta_generic_to_shared(p);
-  asm volatile("ldmatrix.sync.aligned.m8n8.x4.trans.shared.b16 {%0,%1,%2,%3}, [%4];\n" : "=r"(r[0]), "=r"(r[1]), "=r"(r[2]), "=r"(r[3]) : "r"(s));
-}
-__device__ __forceinline__ void pk_cp16(void* smem, const void* gmem) {
-  asm volatile("cp.async.cg.shared.global [%0], [%1], 16;\n" :: "r"((unsigned)__cvta_generic_to_shared(smem)), "l"(gmem));
-}
-__device__ __forceinline__ void pk_cp4(void* smem, const void* gmem) {
-  asm volatile("cp.async.ca.shared.global [%0], [%1], 4;\n" :: "r"((unsigned)__cvta_generic_to_shared(smem)), "l"(gmem));
-}
-__device__ __forceinline__ void pk_commit() { asm volatile("cp.async.commit_group;\n" ::); }
-template <int N> __device__ __forceinline__ void pk_waitn() { asm volatile("cp.async.wait_group %0;\n" :: "n"(N)); }
+__device__ __forceinline__ void pk_mma(float* c, const unsigned* a, unsigned b0, unsigned b1) { yskn::arch::mma_bf16(c, a, b0, b1); }
+__device__ __forceinline__ void pk_ldm4(unsigned* r, const void* p) { yskn::arch::ldm4(r, p); }
+__device__ __forceinline__ void pk_ldm4t(unsigned* r, const void* p) { yskn::arch::ldm4t(r, p); }
+__device__ __forceinline__ void pk_cp16(void* smem, const void* gmem) { yskn::arch::cp16(smem, gmem); }
+__device__ __forceinline__ void pk_cp4(void* smem, const void* gmem) { yskn::arch::cp4(smem, gmem); }
+__device__ __forceinline__ void pk_commit() { yskn::arch::cp_commit(); }
+template <int N> __device__ __forceinline__ void pk_waitn() { yskn::arch::cp_wait<N>(); }
 __device__ __forceinline__ unsigned pk_pack(float lo, float hi) {
   const __nv_bfloat162 v = __floats2bfloat162_rn(lo, hi); return *reinterpret_cast<const unsigned*>(&v);
 }
@@ -103,7 +91,7 @@ template <int HALF> __device__ __forceinline__ void pk_conv16_k5(const unsigned*
   #pragma unroll
   for (int j = 0; j < 8; ++j) b[j] = pk_lk2(tab, s[2 * j], s[2 * j + 1]);
 }
-}  
+}
 
 struct Q35AtxPkArgs { Q35AttnArgs a; const uint8_t* wk; const uint8_t* kp; const uint8_t* vp; const float* kps; const float* vps; const unsigned char* rec; int layer; };
 
@@ -676,6 +664,12 @@ __global__ void __launch_bounds__(RT * WPT * 32, 1) q35_atxpk_vsp_kernel(Q35AtxP
   }
 }
 
+// The device's dynamic shared-memory ceiling (gfx1100: 64KB; sm_86/89: 99KB; sm_120: 227KB).
+// Variants that need more are skipped at setup instead of failing the whole load; on HIP the
+// launchers then select the smaller row shapes (see pk3_go). All upstream CUDA variants fit the
+// 99KB floor, so CUDA setup is unchanged.
+static int pk_smem_limit() { static const int lim = [] { int dev = 0, v = 0; cudaGetDevice(&dev); cudaDeviceGetAttribute(&v, cudaDevAttrMaxSharedMemoryPerBlockOptin, dev); return v > 0 ? v : 65536; }(); return lim; }
+
 #include "q35_atxpk3.cuh"
 #include "q35_atxpk4.cuh"
 constexpr size_t PK_SMEM(int ns) { return (size_t)2 * PK_KT * PK_LD * 2 + (size_t)ns * 2 * PK_KT * Q35_HD + (size_t)ns * 2 * PK_KT * 4 + 2 * 512 + 1024; }
@@ -688,7 +682,8 @@ template <int NS> static void pk_launch(const Q35AtxPkArgs& U, const dim3& grid,
   else launch_k(q35_atxpk_kernel<false, true, NS>, grid, dim3(192), PK_SMEM(NS), st, U);
 }
 template <int KB, bool VPK> static void pk_vsp_set(cudaError_t& e) {
-  auto set = [&](const void* f, size_t smem) { const cudaError_t r = cudaFuncSetAttribute(f, cudaFuncAttributeMaxDynamicSharedMemorySize, (int)smem); if (r != cudaSuccess && e == cudaSuccess) e = r; };
+  auto set = [&](const void* f, size_t smem) { if ((int)smem > pk_smem_limit()) return;   // skip variants above the device LDS ceiling (inert on CUDA: all fit)
+    const cudaError_t r = cudaFuncSetAttribute(f, cudaFuncAttributeMaxDynamicSharedMemorySize, (int)smem); if (r != cudaSuccess && e == cudaSuccess) e = r; };
   set((const void*)q35_atxpk_vsp_kernel<KB, true, VPK, 1, 4>, pkt_smem<KB, true, VPK>());
   set((const void*)q35_atxpk_vsp_kernel<KB, true, VPK, 3, 4>, pkt_smem<KB, true, VPK>());
   set((const void*)q35_atxpk_vsp_kernel<KB, true, VPK, 6, 2>, pkt_smem<KB, true, VPK>());
@@ -703,7 +698,8 @@ void launch_q35_atx_pk(const Q35AttnArgs& A, const uint8_t* wk, const Q35PkArgs&
   static bool attr = false;
   if (!attr) {
     cudaError_t e = cudaSuccess;
-    auto set = [&](const void* f, size_t smem) { const cudaError_t r = cudaFuncSetAttribute(f, cudaFuncAttributeMaxDynamicSharedMemorySize, (int)smem); if (r != cudaSuccess && e == cudaSuccess) e = r; };
+    auto set = [&](const void* f, size_t smem) { if ((int)smem > pk_smem_limit()) return;   // skip variants above the device LDS ceiling (inert on CUDA: all fit)
+      const cudaError_t r = cudaFuncSetAttribute(f, cudaFuncAttributeMaxDynamicSharedMemorySize, (int)smem); if (r != cudaSuccess && e == cudaSuccess) e = r; };
     set((const void*)q35_atxpk_kernel<true, true, 2>, PK_SMEM(2)); set((const void*)q35_atxpk_kernel<true, false, 2>, PK_SMEM(2)); set((const void*)q35_atxpk_kernel<false, true, 2>, PK_SMEM(2));
     set((const void*)q35_atxpk_kernel<true, true, 3>, PK_SMEM(3)); set((const void*)q35_atxpk_kernel<true, false, 3>, PK_SMEM(3)); set((const void*)q35_atxpk_kernel<false, true, 3>, PK_SMEM(3));
     pk_vsp_set<4, true>(e); pk_vsp_set<4, false>(e); pk_vsp_set<5, true>(e); pk_vsp_set<5, false>(e);

@@ -1,5 +1,6 @@
 // SPDX-License-Identifier: Apache-2.0
 // Copyright (c) 2026 the YASAKANI authors
+#include "gpu_arch.cuh"
 #include "pdl.cuh"
 #include "q35.hpp"
 #include "kz_common.cuh"
@@ -116,22 +117,12 @@ __device__ __forceinline__ void kz_vsplit(float s, unsigned& M, int& e) {
   const unsigned b = __float_as_uint(s); const int e8 = (b >> 23) & 255;
   M = e8 ? ((b & 0x7FFFFFu) | 0x800000u) : (b & 0x7FFFFFu); e = e8 ? e8 - 126 : -125;
 }
-__device__ __forceinline__ void kz_mma_s8(int* c, const unsigned* a, unsigned b0, unsigned b1) {
-  asm volatile("mma.sync.aligned.m16n8k32.row.col.s32.s8.s8.s32 {%0,%1,%2,%3}, {%4,%5,%6,%7}, {%8,%9}, {%0,%1,%2,%3};\n"
-               : "+r"(c[0]), "+r"(c[1]), "+r"(c[2]), "+r"(c[3]) : "r"(a[0]), "r"(a[1]), "r"(a[2]), "r"(a[3]), "r"(b0), "r"(b1));
-}
-__device__ __forceinline__ void kz_mma_u8(int* c, const unsigned* a, unsigned b0, unsigned b1) {
-  asm volatile("mma.sync.aligned.m16n8k32.row.col.s32.u8.s8.s32 {%0,%1,%2,%3}, {%4,%5,%6,%7}, {%8,%9}, {%0,%1,%2,%3};\n"
-               : "+r"(c[0]), "+r"(c[1]), "+r"(c[2]), "+r"(c[3]) : "r"(a[0]), "r"(a[1]), "r"(a[2]), "r"(a[3]), "r"(b0), "r"(b1));
-}
-__device__ __forceinline__ void kz_cp16(void* smem, const void* gmem) {
-  asm volatile("cp.async.cg.shared.global [%0], [%1], 16;\n" :: "r"((unsigned)__cvta_generic_to_shared(smem)), "l"(gmem));
-}
-__device__ __forceinline__ void kz_cp4(void* smem, const void* gmem) {
-  asm volatile("cp.async.ca.shared.global [%0], [%1], 4;\n" :: "r"((unsigned)__cvta_generic_to_shared(smem)), "l"(gmem));
-}
-__device__ __forceinline__ void kz_commit() { asm volatile("cp.async.commit_group;\n" ::); }
-template <int N> __device__ __forceinline__ void kz_waitn() { asm volatile("cp.async.wait_group %0;\n" :: "n"(N)); }
+__device__ __forceinline__ void kz_mma_s8(int* c, const unsigned* a, unsigned b0, unsigned b1) { yskn::arch::mma_s8(c, a, b0, b1); }
+__device__ __forceinline__ void kz_mma_u8(int* c, const unsigned* a, unsigned b0, unsigned b1) { yskn::arch::mma_u8s8(c, a, b0, b1); }
+__device__ __forceinline__ void kz_cp16(void* smem, const void* gmem) { yskn::arch::cp16(smem, gmem); }
+__device__ __forceinline__ void kz_cp4(void* smem, const void* gmem) { yskn::arch::cp4(smem, gmem); }
+__device__ __forceinline__ void kz_commit() { yskn::arch::cp_commit(); }
+template <int N> __device__ __forceinline__ void kz_waitn() { yskn::arch::cp_wait<N>(); }
 __device__ __forceinline__ unsigned kz_ld16(const uint8_t* p) { return *reinterpret_cast<const unsigned short*>(p); }
 __device__ __forceinline__ unsigned kz_ld32(const uint8_t* p) { return *reinterpret_cast<const unsigned*>(p); }
 
@@ -466,10 +457,7 @@ __host__ __device__ constexpr size_t kr_q(int rt) { return (size_t)rt * 3 * 8 * 
 __host__ __device__ constexpr size_t kr_wf(int rt) { return (size_t)rt * 3 * 16 * 32; }          
 __host__ __device__ constexpr size_t kr_x(int rt) { return (size_t)rt * 4 * 16 * 4; }            
 constexpr size_t kr_smem(int rt) { return KR_ST + KR_SC + KR_VT + kr_q(rt) + kr_wf(rt) + 2 * kr_x(rt) + 2 * kr_x(rt) + 2 * kr_x(rt) + 256 * 4; }
-__device__ __forceinline__ void kz_ldm4(unsigned* r, const void* p) {
-  const unsigned a = (unsigned)__cvta_generic_to_shared(p);
-  asm volatile("ldmatrix.sync.aligned.m8n8.x4.shared.b16 {%0,%1,%2,%3}, [%4];\n" : "=r"(r[0]), "=r"(r[1]), "=r"(r[2]), "=r"(r[3]) : "r"(a));
-}
+__device__ __forceinline__ void kz_ldm4(unsigned* r, const void* p) { yskn::arch::ldm4(r, p); }
 __device__ __forceinline__ int kz_swz(int row) { return ((row >> 2) & 1) << 4; }       
 __device__ __forceinline__ unsigned long long kz_shfl64(unsigned long long v, int o) {
   const unsigned lo = __shfl_xor_sync(0xffffffffu, (unsigned)v, o), hi = __shfl_xor_sync(0xffffffffu, (unsigned)(v >> 32), o);

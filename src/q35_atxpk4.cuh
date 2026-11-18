@@ -56,7 +56,7 @@ template <int HALF> __device__ __forceinline__ void pk4_conv16_k5_s8(const unsig
   #pragma unroll
   for (int j = 0; j < 4; ++j) w[j] = pk3_lk4(tab8, s[4 * j], s[4 * j + 1], s[4 * j + 2], s[4 * j + 3]);
 }
-__device__ __forceinline__ void pk4_bar(int id, int nthreads) { asm volatile("bar.sync %0, %1;\n" :: "r"(id), "r"(nthreads) : "memory"); }   
+__device__ __forceinline__ void pk4_bar(int id, int nthreads) { yskn::arch::bar_sync(id, nthreads); }   
 }  
 
 template <int KB, bool VPK, int RT, int WPT, bool QK8>
@@ -420,9 +420,10 @@ __global__ void __launch_bounds__(RT * WPT * 32, 1) q35_atxpk4_kernel(Q35AtxPkAr
 
 
 template <int KB, bool VPK, bool QK8> static void pk4_set(cudaError_t& e) {
-  auto set = [&](const void* f, size_t smem) { const cudaError_t r = cudaFuncSetAttribute(f, cudaFuncAttributeMaxDynamicSharedMemorySize, (int)smem); if (r != cudaSuccess && e == cudaSuccess) e = r; };
-  set((const void*)q35_atxpk4_kernel<KB, VPK, 3, 4, QK8>, pk4_smem<KB, VPK, QK8>());
-  set((const void*)q35_atxpk4_kernel<KB, VPK, 6, 2, QK8>, pk4_smem<KB, VPK, QK8>());
+  auto set = [&](const void* f, size_t smem, size_t stat) { if ((int)(smem + stat) > pk_smem_limit()) return;   // skip variants whose static+dynamic LDS exceeds the device ceiling (inert on CUDA)
+    const cudaError_t r = cudaFuncSetAttribute(f, cudaFuncAttributeMaxDynamicSharedMemorySize, (int)smem); if (r != cudaSuccess && e == cudaSuccess) e = r; };
+  set((const void*)q35_atxpk4_kernel<KB, VPK, 3, 4, QK8>, pk4_smem<KB, VPK, QK8>(), pk4_static<3>());
+  set((const void*)q35_atxpk4_kernel<KB, VPK, 6, 2, QK8>, pk4_smem<KB, VPK, QK8>(), pk4_static<6>());
 }
 static void pk4_set_all(cudaError_t& e) {
   pk4_set<4, true, false>(e); pk4_set<4, false, false>(e); pk4_set<5, true, false>(e); pk4_set<5, false, false>(e);

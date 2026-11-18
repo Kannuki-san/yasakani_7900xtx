@@ -3,6 +3,8 @@
 
 
 
+#include "gpu_arch.cuh"
+#include "pdl.cuh"
 #include "q35_g6.hpp"
 #include "pm_math.cuh"
 #include <algorithm>
@@ -23,15 +25,10 @@ template <int K> __device__ __forceinline__ unsigned g6_field(const unsigned* w,
   if (sh + FB > 32) v |= w[wi + 1] << (32 - sh);
   if constexpr (FB >= 32) return v; else return v & ((1u << FB) - 1u);
 }
-__device__ __forceinline__ void mt_mma(int* d, const unsigned* a, uint2 b) {       
-  asm volatile("mma.sync.aligned.m16n8k32.row.col.s32.s8.s8.s32 {%0,%1,%2,%3}, {%4,%5,%6,%7}, {%8,%9}, {%0,%1,%2,%3};\n"
-               : "+r"(d[0]), "+r"(d[1]), "+r"(d[2]), "+r"(d[3]) : "r"(a[0]), "r"(a[1]), "r"(a[2]), "r"(a[3]), "r"(b.x), "r"(b.y));
-}
-__device__ __forceinline__ void mt_cp_commit() { asm volatile("cp.async.commit_group;\n" ::: "memory"); }
-__device__ __forceinline__ void mt_cp16s(unsigned saddr, const void* gmem_src) {  
-  asm volatile("cp.async.cg.shared.global [%0], [%1], 16;\n" :: "r"(saddr), "l"(gmem_src) : "memory");
-}
-__device__ __forceinline__ void mt_mad_wide(long long& acc, int a, int b) { asm("mad.wide.s32 %0, %1, %2, %0;" : "+l"(acc) : "r"(a), "r"(b)); }
+__device__ __forceinline__ void mt_mma(int* d, const unsigned* a, uint2 b) { yskn::arch::mma_s8(d, a, b.x, b.y); }
+__device__ __forceinline__ void mt_cp_commit() { yskn::arch::cp_commit(); }
+__device__ __forceinline__ void mt_cp16s(uintptr_t saddr, const void* gmem_src) { yskn::arch::cp16((void*)saddr, gmem_src); }
+__device__ __forceinline__ void mt_mad_wide(long long& acc, int a, int b) { acc += (long long)a * b; }
 template <int K> __global__ void __launch_bounds__(256) mt_predecode2_kernel(TensorDev t, uint4* w8) {
   constexpr int NU = K / 2, T = 12 - K, TS = 3 * K - 12, SS = 8;
   constexpr unsigned PM = (1u << (2 * K)) - 1u, TM = (1u << T) - 1u;
@@ -75,11 +72,8 @@ template <int MB> struct G6C {
   static constexpr size_t SMEM = (size_t)G6_S * (SA + SB) + (size_t)2 * BM * G6_GP * 4 + (size_t)2 * 2 * BM * 4;
   static constexpr int NACC = MB * 4 * 4;                              
 };
-template <int N> __device__ __forceinline__ void g6_cp_wait() { asm volatile("cp.async.wait_group %0;\n" :: "n"(N) : "memory"); }
-__device__ __forceinline__ void g6_mma0(int* d, const unsigned* a, uint2 b) {   
-  asm volatile("mma.sync.aligned.m16n8k32.row.col.s32.s8.s8.s32 {%0,%1,%2,%3}, {%4,%5,%6,%7}, {%8,%9}, {%10,%10,%10,%10};\n"
-               : "=r"(d[0]), "=r"(d[1]), "=r"(d[2]), "=r"(d[3]) : "r"(a[0]), "r"(a[1]), "r"(a[2]), "r"(a[3]), "r"(b.x), "r"(b.y), "r"(0));
-}
+template <int N> __device__ __forceinline__ void g6_cp_wait() { yskn::arch::cp_wait<N>(); }
+__device__ __forceinline__ void g6_mma0(int* d, const unsigned* a, uint2 b) { yskn::arch::mma_s8_0(d, a, b.x, b.y); }
 template <int MB, bool BG, bool PN>   
 __global__ void __launch_bounds__(G6_NT, 1) mt_gemm6_kernel(Q35G6Args P, int MT, int G, long long* skp, int* sks) {
   using C = G6C<MB>;
@@ -99,7 +93,7 @@ __global__ void __launch_bounds__(G6_NT, 1) mt_gemm6_kernel(Q35G6Args P, int MT,
   const int U = MT * NT * G;                                           
   const int u0 = (int)((long long)U * blockIdx.x / gridDim.x), u1 = (int)((long long)U * (blockIdx.x + 1) / gridDim.x);
   const int nq = (u1 - u0) * 8;                                        
-  const unsigned sA_s = (unsigned)__cvta_generic_to_shared(sA), sB_s = (unsigned)__cvta_generic_to_shared(sB);
+  const uintptr_t sA_s = (uintptr_t)sA, sB_s = (uintptr_t)sB;   // generic pointers; arch wrappers convert on CUDA
   auto seg_of = [&](int tn) { return tn >= cb2 ? 2 : (tn >= cb1 ? 1 : 0); };
   
 #define G6F(f, s) ((s) == 0 ? P.seg[0].f : ((s) == 1 ? P.seg[1].f : P.seg[2].f))
@@ -120,7 +114,7 @@ __global__ void __launch_bounds__(G6_NT, 1) mt_gemm6_kernel(Q35G6Args P, int MT,
   };
   auto produce = [&](int slot) {                                       
     if (pkk == 0 && (pu == u0 || pg == 0)) psetup();
-    const unsigned sa = sA_s + slot * SA + dA, sb = sB_s + slot * SB + dB;
+    const uintptr_t sa = sA_s + slot * SA + dA, sb = sB_s + slot * SB + dB;
     if (r0 < pcnt) mt_cp16s(sa, pa);
     if constexpr (NA == 2) { if (r0 + 64 < pcnt) mt_cp16s(sa + 4096, pa + (size_t)64 * pkc); }
     if (pv0) mt_cp16s(sb, pb); if (pv1) mt_cp16s(sb + 4096, pb + (size_t)4 * pkc);   
@@ -147,8 +141,8 @@ __global__ void __launch_bounds__(G6_NT, 1) mt_gemm6_kernel(Q35G6Args P, int MT,
     }
   };
   const int lrow = (lane & 7) + 8 * ((lane >> 3) & 1), lh = lane >> 4, sw = (lrow >> 1) & 3;   
-  const unsigned aw = sA_s + (16 * MB * wm + lrow) * 64, a0off = 16 * ((0 + lh) ^ sw), a1off = 16 * ((2 + lh) ^ sw);
-  const unsigned bw = sB_s + ((2 * wn) * 64 + lane) * 16;
+  const uintptr_t aw = sA_s + (16 * MB * wm + lrow) * 64; const unsigned a0off = 16 * ((0 + lh) ^ sw), a1off = 16 * ((2 + lh) ^ sw);
+  const uintptr_t bw = sB_s + ((2 * wn) * 64 + lane) * 16;
   int d[MB][4][4]; long long acc[MB][4][4];
   #pragma unroll
   for (int i = 0; i < MB; ++i) {
@@ -161,16 +155,15 @@ __global__ void __launch_bounds__(G6_NT, 1) mt_gemm6_kernel(Q35G6Args P, int MT,
     #pragma unroll
     for (int s = 0; s < 2; ++s) {
       uint4 ba, bc; unsigned a[2][4];
-      const unsigned bb = bw + slot * SB, as = aw + slot * SA + (s ? a1off : a0off);
-      asm volatile("ld.shared.v4.u32 {%0, %1, %2, %3}, [%4];\n" : "=r"(ba.x), "=r"(ba.y), "=r"(ba.z), "=r"(ba.w) : "r"(bb + s * 512));
-      asm volatile("ld.shared.v4.u32 {%0, %1, %2, %3}, [%4];\n" : "=r"(bc.x), "=r"(bc.y), "=r"(bc.z), "=r"(bc.w) : "r"(bb + 1024 + s * 512));
-      asm volatile("ldmatrix.sync.aligned.m8n8.x4.shared.b16 {%0, %1, %2, %3}, [%4];\n" : "=r"(a[0][0]), "=r"(a[0][1]), "=r"(a[0][2]), "=r"(a[0][3]) : "r"(as));
+      const uintptr_t bb = bw + slot * SB, as = aw + slot * SA + (s ? a1off : a0off);
+      ba = yskn::arch::ld_shared_v4((const void*)(bb + s * 512));
+      bc = yskn::arch::ld_shared_v4((const void*)(bb + 1024 + s * 512));
+      yskn::arch::ldm4(a[0], (const void*)as);
       const uint2 b0 = make_uint2(ba.x, ba.y), b1 = make_uint2(ba.z, ba.w), b2 = make_uint2(bc.x, bc.y), b3 = make_uint2(bc.z, bc.w);
       #pragma unroll
       for (int i = 0; i < MB; ++i) {                                   
         if (i + 1 < MB)
-          asm volatile("ldmatrix.sync.aligned.m8n8.x4.shared.b16 {%0, %1, %2, %3}, [%4];\n"
-                       : "=r"(a[(i + 1) & 1][0]), "=r"(a[(i + 1) & 1][1]), "=r"(a[(i + 1) & 1][2]), "=r"(a[(i + 1) & 1][3]) : "r"(as + (i + 1) * 1024));
+          yskn::arch::ldm4(a[(i + 1) & 1], (const void*)(as + (i + 1) * 1024));
         if (first && s == 0) { g6_mma0(d[i][0], a[i & 1], b0); g6_mma0(d[i][1], a[i & 1], b1); g6_mma0(d[i][2], a[i & 1], b2); g6_mma0(d[i][3], a[i & 1], b3); }
         else { mt_mma(d[i][0], a[i & 1], b0); mt_mma(d[i][1], a[i & 1], b1); mt_mma(d[i][2], a[i & 1], b2); mt_mma(d[i][3], a[i & 1], b3); }
       }
@@ -278,6 +271,8 @@ __global__ void __launch_bounds__(G6_NT, 1) mt_gemm6_kernel(Q35G6Args P, int MT,
 
 template <int MB, bool BG, bool PN> static int g6_prepare_kernel(int sms) {
   using C = G6C<MB>;
+  // CUDA-only (the HIP prepare path keeps resident[]=0, see q35_g6_prepare): keep the
+  // upstream hard-error semantics; a configuration failure here is a build/device mismatch.
   if (cudaFuncSetAttribute(mt_gemm6_kernel<MB, BG, PN>, cudaFuncAttributeMaxDynamicSharedMemorySize, (int)C::SMEM) != cudaSuccess)
     throw std::runtime_error("q35_g6: dynamic shared-memory configuration failed");
   int per = 0;
@@ -286,10 +281,20 @@ template <int MB, bool BG, bool PN> static int g6_prepare_kernel(int sms) {
   return sms * per;
 }
 void q35_g6_prepare(Q35G6Workspace& W, int sms) {
+#if defined(__HIP_PLATFORM_AMD__)
+  // mt_gemm6 is unusable on gfx1100 (measured): 585-2289 VGPR spills and the 55KB
+  // dynamic-LDS launch fails with "invalid argument". Keep resident[] = 0 so
+  // launch_q35_g6 always declines; the engine then uses the hipBLAS prefill GEMM
+  // (backends/hip/prefill) or PFA when that is killed. The weight workspace is
+  // still allocated by the engine and used by layer_prepare/prefill_vsp for the
+  // trellis->int8 predecode cache, which the hipBLAS path reuses.
+  (void)sms;
+#else
   W.resident[0] = g6_prepare_kernel<4, false, false>(sms);
   W.resident[1] = g6_prepare_kernel<4, false, true>(sms);
   W.resident[2] = g6_prepare_kernel<2, true, false>(sms);
   W.resident[3] = g6_prepare_kernel<2, true, true>(sms);
+#endif
   int cap = *std::max_element(W.resident, W.resident + 4);
   W.partial_bytes = (size_t)(cap + 1) * G6_NT * G6C<4>::NACC * sizeof(long long);
   W.flags_bytes = (size_t)(cap + 1) * 2 * sizeof(int);
@@ -303,13 +308,23 @@ template <int MB, bool BG, bool PN> static void g6_launch(Q35G6Args P, Q35G6Work
 }
 void q35_g6_decode(const TensorDev& t, uint4* dst, cudaStream_t st) {
   const int blocks = ((t.N / 16) * (t.Kc / 256) + 7) / 8;
-  if (t.k_default == 6) mt_predecode2_kernel<6><<<blocks, 256, 0, st>>>(t, dst);
-  else if (t.k_default == 8) mt_predecode2_kernel<8><<<blocks, 256, 0, st>>>(t, dst);
-  else mt_predecode2_kernel<4><<<blocks, 256, 0, st>>>(t, dst);
+  // kdbg names the kernel actually launched (a wrong stub would misattribute a sticky error)
+  if (t.k_default == 6) { mt_predecode2_kernel<6><<<blocks, 256, 0, st>>>(t, dst); kdbg_check((const void*)mt_predecode2_kernel<6>, dim3(blocks), dim3(256), 0); }
+  else if (t.k_default == 8) { mt_predecode2_kernel<8><<<blocks, 256, 0, st>>>(t, dst); kdbg_check((const void*)mt_predecode2_kernel<8>, dim3(blocks), dim3(256), 0); }
+  else { mt_predecode2_kernel<4><<<blocks, 256, 0, st>>>(t, dst); kdbg_check((const void*)mt_predecode2_kernel<4>, dim3(blocks), dim3(256), 0); }
 }
 bool launch_q35_g6(const GemvLaunch& P, Q35G6Workspace& W, int pm, cudaStream_t st) {
   if (!W.weights || P.M < 256 || !P.xsum || P.lo || P.fuse || P.draft || P.e_fuse || P.f_mode || P.xsm_part || P.n_seg < 1 || P.n_seg > 3)
     return false;
+#if defined(__HIP_PLATFORM_AMD__)
+  // gfx1100: q35_g6_prepare keeps resident[]=0 because mt_gemm6 is unusable here
+  // (VGPR spills + dynamic-LDS launch failure). Decline BEFORE the recursive
+  // per-segment split below: that path throws when a split call declines, which
+  // would break the YSKN_HIP_PREFILL=0 kill switch (it must fall back to PFA
+  // cleanly, not abort). CUDA keeps the original behavior (resident[]>0 normally).
+  if (W.resident[0] == 0 && W.resident[1] == 0 && W.resident[2] == 0 && W.resident[3] == 0)
+    return false;
+#endif
   size_t bytes = 0, shape_bytes = 0; int nt = 0; bool pn = false; const int Kc = P.seg[0].t.Kc;
   if (Kc < 512 || Kc % 512) return false;
   Q35G6Args Q{}; Q.n_seg = P.n_seg; Q.R = P.M; Q.eps = P.xsm_eps; Q.us_out = P.us_out;
@@ -346,8 +361,13 @@ bool launch_q35_g6(const GemvLaunch& P, Q35G6Workspace& W, int pm, cudaStream_t 
     else if (t.k_default == 8) mt_predecode2_kernel<8><<<blocks, 256, 0, st>>>(t, dst);
     else mt_predecode2_kernel<4><<<blocks, 256, 0, st>>>(t, dst);
   }
-  if (Kc / 512 > G6_GP) { if (pn) g6_launch<2, true, true>(Q, W, st); else g6_launch<2, true, false>(Q, W, st); }
-  else { if (pn) g6_launch<4, false, true>(Q, W, st); else g6_launch<4, false, false>(Q, W, st); }
+  // Prefer MB=4 (Kc/512 <= G6_GP) when it fits the device; otherwise fall back to MB=2
+  // (55KB, fits gfx1100's 64KB). resident[]==0 marks a variant skipped at prepare time.
+  const bool mb4_ok = (W.resident[0] > 0 || W.resident[1] > 0);
+  if (Kc / 512 > G6_GP || !mb4_ok) {
+    if (W.resident[2] == 0 && W.resident[3] == 0) return false;   // no variant fits: lnord fallback
+    if (pn) g6_launch<2, true, true>(Q, W, st); else g6_launch<2, true, false>(Q, W, st);
+  } else { if (pn) g6_launch<4, false, true>(Q, W, st); else g6_launch<4, false, false>(Q, W, st); }
   return true;
 }
 }  

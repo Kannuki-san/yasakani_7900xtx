@@ -1,5 +1,6 @@
 // SPDX-License-Identifier: Apache-2.0
 // Copyright (c) 2026 the YASAKANI authors
+#include "gpu_arch.cuh"
 #include "kvx_codec.cuh"
 #include "pdl.cuh"
 #include <cuda_fp16.h>
@@ -23,7 +24,7 @@ __device__ __forceinline__ void q35_l2pf(const Q35Pf& f, unsigned part, unsigned
     const unsigned long long a = (f.n[s] * part / np) & ~15ull, b = (f.n[s] * (part + 1) / np) & ~15ull;
     for (unsigned long long o = a; o < b; o += 65520ull) {
       const unsigned len = (unsigned)(b - o < 65520ull ? b - o : 65520ull);
-#if !defined(__CUDA_ARCH__) || __CUDA_ARCH__ >= 900   // cp.async.bulk needs sm_90+
+#if !defined(__HIP_PLATFORM_AMD__) && (!defined(__CUDA_ARCH__) || __CUDA_ARCH__ >= 900)   // cp.async.bulk needs sm_90+
       asm volatile("cp.async.bulk.prefetch.L2.global [%0], %1;" :: "l"(static_cast<const char*>(f.p[s]) + o), "r"(len) : "memory");
 #endif
     }
@@ -476,22 +477,22 @@ __global__ void __launch_bounds__(128) q35_state_pf_kernel(Q35StateArgs A) {
     for (int c = tid; c < nr * 32; c += 128) {                            
       const int rr = c >> 5, ch = c & 31, qw = ch >> 3, off = (ch & 7) * 4;
       const size_t src = ((size_t)(t0 + rr) * Q35_GK + kh) * Q35_GD + qw * 32 + off;
-      const unsigned dk = (unsigned)__cvta_generic_to_shared(&sk[b][rr][qw * 36 + off]), dq = (unsigned)__cvta_generic_to_shared(&sq[b][rr][qw * 36 + off]);
-      asm volatile("cp.async.cg.shared.global [%0], [%1], 16;\n" :: "r"(dk), "l"(A.k + src) : "memory");
-      asm volatile("cp.async.cg.shared.global [%0], [%1], 16;\n" :: "r"(dq), "l"(A.q + src) : "memory");
+      void* dk = &sk[b][rr][qw * 36 + off]; void* dq = &sq[b][rr][qw * 36 + off];
+      yskn::arch::cp16(dk, A.k + src);
+      yskn::arch::cp16(dq, A.q + src);
     }
     for (int c = tid; c < nr * 8; c += 128) {                             
       const int rr = c >> 3, ch = c & 7;
-      const unsigned dv = (unsigned)__cvta_generic_to_shared(&sv[b][rr][ch * 4]);
-      asm volatile("cp.async.cg.shared.global [%0], [%1], 16;\n" :: "r"(dv), "l"(A.v + ((size_t)(t0 + rr) * Q35_GV + h) * Q35_GD + blockIdx.y * 32 + ch * 4) : "memory");
+      void* dv = &sv[b][rr][ch * 4];
+      yskn::arch::cp16(dv, A.v + ((size_t)(t0 + rr) * Q35_GV + h) * Q35_GD + blockIdx.y * 32 + ch * 4);
     }
-    asm volatile("cp.async.commit_group;\n" ::: "memory");
+    yskn::arch::cp_commit();
     if (tid < nr) { seg[b][tid] = q35_exp(A.g[(size_t)(t0 + tid) * Q35_GV + h]); sbt[b][tid] = A.beta[(size_t)(t0 + tid) * Q35_GV + h]; }
   };
   const int base = lane & ~3;
   if (A.M > 0) stage(0, 0);
   for (int t0 = 0, b = 0; t0 < A.M; t0 += Q35_ST_TS, b ^= 1) {
-    asm volatile("cp.async.wait_group 0;\n" ::: "memory");
+    yskn::arch::cp_wait<0>();
     __syncthreads();                                                       
     if (t0 + Q35_ST_TS < A.M) stage(t0 + Q35_ST_TS, b ^ 1);
     const int nr = min(Q35_ST_TS, A.M - t0);
@@ -553,23 +554,23 @@ __global__ void __launch_bounds__(512, 1) q35_state_nb_kernel(Q35StateArgs A) {
     for (int c = tid; c < nr * 32; c += 512) {                            
       const int rr = c >> 5, ch = c & 31, qw = ch >> 3, off = (ch & 7) * 4;
       const size_t src = ((size_t)(t0 + rr) * Q35_GK + kh) * Q35_GD + qw * 32 + off;
-      const unsigned dk = (unsigned)__cvta_generic_to_shared(sk + ((size_t)b * TS + rr) * KQ + qw * 36 + off);
-      const unsigned dq = (unsigned)__cvta_generic_to_shared(sq + ((size_t)b * TS + rr) * KQ + qw * 36 + off);
-      asm volatile("cp.async.cg.shared.global [%0], [%1], 16;\n" :: "r"(dk), "l"(A.k + src) : "memory");
-      asm volatile("cp.async.cg.shared.global [%0], [%1], 16;\n" :: "r"(dq), "l"(A.q + src) : "memory");
+      void* dk = sk + ((size_t)b * TS + rr) * KQ + qw * 36 + off;
+      void* dq = sq + ((size_t)b * TS + rr) * KQ + qw * 36 + off;
+      yskn::arch::cp16(dk, A.k + src);
+      yskn::arch::cp16(dq, A.q + src);
     }
     for (int c = tid; c < nr * 32; c += 512) {                            
       const int rr = c >> 5, ch = c & 31;
-      const unsigned dv = (unsigned)__cvta_generic_to_shared(sv + ((size_t)b * TS + rr) * 128 + ch * 4);
-      asm volatile("cp.async.cg.shared.global [%0], [%1], 16;\n" :: "r"(dv), "l"(A.v + ((size_t)(t0 + rr) * Q35_GV + h) * Q35_GD + ch * 4) : "memory");
+      void* dv = sv + ((size_t)b * TS + rr) * 128 + ch * 4;
+      yskn::arch::cp16(dv, A.v + ((size_t)(t0 + rr) * Q35_GV + h) * Q35_GD + ch * 4);
     }
-    asm volatile("cp.async.commit_group;\n" ::: "memory");
+    yskn::arch::cp_commit();
     if (tid < nr) { seg[b * TS + tid] = q35_exp(A.g[(size_t)(t0 + tid) * Q35_GV + h]); sbt[b * TS + tid] = A.beta[(size_t)(t0 + tid) * Q35_GV + h]; }
   };
   const int base = lane & ~3;
   if (A.M > 0) stage(0, 0);
   for (int t0 = 0, b = 0; t0 < A.M; t0 += TS, b ^= 1) {
-    asm volatile("cp.async.wait_group 0;\n" ::: "memory");
+    yskn::arch::cp_wait<0>();
     __syncthreads();
     if (t0 + TS < A.M) stage(t0 + TS, b ^ 1);
     const int nr = min(TS, A.M - t0);
@@ -600,6 +601,7 @@ void launch_q35_state_nb(const Q35StateArgs& A, cudaStream_t st) {
   static bool attr = false;
   if (!attr) { cudaFuncSetAttribute(q35_state_nb_kernel, cudaFuncAttributeMaxDynamicSharedMemorySize, (int)Q35_NB_SMEM); attr = true; }
   q35_state_nb_kernel<<<Q35_GV, 512, Q35_NB_SMEM, st>>>(A);
+  kdbg_check((const void*)q35_state_nb_kernel, dim3(Q35_GV), dim3(512), Q35_NB_SMEM);
 }
 static bool q35_pf_launch(int M) { return M > 64 && q35_pfalt() != 0; }
 
@@ -1082,7 +1084,7 @@ __global__ void __launch_bounds__(512) tb_requant_kernel(Q35AttnPostArgs A) {
 }
 void launch_tb_requant(const Q35AttnPostArgs& A, cudaStream_t st) {
   const TbHost& H = tbf_host();
-  if (!H.scr) { tb_requant_kernel<<<dim3(4, A.M), dim3(512), 0, st>>>(A); return; }      
+  if (!H.scr) { tb_requant_kernel<<<dim3(4, A.M), dim3(512), 0, st>>>(A); kdbg_check((const void*)tb_requant_kernel, dim3(4, A.M), dim3(512), 0); return; }      
   TbFastArgs F{};                                                                         
   F.blob = A.tb; F.nm = H.nm; F.has_cdq = H.has_cdq; F.q8_0 = A.k8; F.q8_1 = A.v8; F.qs_0 = A.ks; F.qs_1 = A.vs;
   F.max_ctx = A.max_ctx; F.d_pos = A.d_pos; F.layer = A.tb_layer; F.scr = A.tb_scr ? A.tb_scr : H.scr;
@@ -1564,7 +1566,7 @@ __global__ void __launch_bounds__(32) q35_l2pf_kernel(Q35Pf f) {
     if (!f.p[s] || !f.n[s]) continue;
     for (unsigned long long o = (unsigned long long)blockIdx.x * 65536ull; o < f.n[s]; o += (unsigned long long)gridDim.x * 65536ull) {
       const unsigned len = (unsigned)((f.n[s] - o < 65536ull ? f.n[s] - o : 65536ull) & ~15ull);
-#if !defined(__CUDA_ARCH__) || __CUDA_ARCH__ >= 900   // cp.async.bulk needs sm_90+
+#if !defined(__HIP_PLATFORM_AMD__) && (!defined(__CUDA_ARCH__) || __CUDA_ARCH__ >= 900)   // cp.async.bulk needs sm_90+
       if (len) asm volatile("cp.async.bulk.prefetch.L2.global [%0], %1;" :: "l"(static_cast<const char*>(f.p[s]) + o), "r"(len) : "memory");
 #endif
     }

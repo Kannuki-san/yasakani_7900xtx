@@ -87,10 +87,7 @@ __device__ __forceinline__ void pk3_conv16_k4_lut(const unsigned* rw, int ch, co
   #pragma unroll
   for (int j = 5; j < 8; ++j) b[j] = plut[(w.y >> (24 - 8 * (j - 4))) & 4095u];
 }
-__device__ __forceinline__ void pk3_mma_s8(int* c, const unsigned* a, unsigned b0, unsigned b1) {           
-  asm volatile("mma.sync.aligned.m16n8k32.row.col.s32.s8.s8.s32 {%0,%1,%2,%3}, {%4,%5,%6,%7}, {%8,%9}, {%0,%1,%2,%3};\n"
-               : "+r"(c[0]), "+r"(c[1]), "+r"(c[2]), "+r"(c[3]) : "r"(a[0]), "r"(a[1]), "r"(a[2]), "r"(a[3]), "r"(b0), "r"(b1));
-}
+__device__ __forceinline__ void pk3_mma_s8(int* c, const unsigned* a, unsigned b0, unsigned b1) { yskn::arch::mma_s8(c, a, b0, b1); }
 __device__ __forceinline__ unsigned pk3_lk4(const uint8_t* tab8, unsigned s0, unsigned s1, unsigned s2, unsigned s3) {   
   return (unsigned)tab8[s0] | ((unsigned)tab8[s1] << 8) | ((unsigned)tab8[s2] << 16) | ((unsigned)tab8[s3] << 24);
 }
@@ -482,6 +479,7 @@ static int pk3_skew_env() { static const int v = [] { const char* e = std::geten
 static int pk3_qk8_env() { static const int v = [] { const char* e = std::getenv("YSKN_ATX_PK3_QK8"); return e ? (std::atoi(e) != 0) : 0; }(); return v; }
 static int pk3_plut_env() { static const int v = [] { const char* e = std::getenv("YSKN_ATX_PK3_PLUT"); return e ? (std::atoi(e) != 0) : 0; }(); return v; }   
 template <int KB, bool VPK, int NST> static void pk3_set_lut(cudaError_t& e) {
+  if ((int)pk3_smem<KB, VPK, 1, 4, NST, true, true>() > pk_smem_limit()) return;   // skip variants above the device LDS ceiling (inert on CUDA: all fit)
   const cudaError_t r = cudaFuncSetAttribute((const void*)q35_atxpk3_kernel<KB, VPK, 1, 4, NST, true, 4, false, true>, cudaFuncAttributeMaxDynamicSharedMemorySize, (int)pk3_smem<KB, VPK, 1, 4, NST, true, true>());
   if (r != cudaSuccess && e == cudaSuccess) e = r;
 }
@@ -490,16 +488,27 @@ template <int KB, bool VPK, int NST> static void pk3_go_lut(const Q35AtxPkArgs& 
   launch_k(q35_atxpk3_kernel<KB, VPK, 1, 4, NST, true, 4, false, true>, dim3((M + 1) / 2, sp, Q35_KVH), dim3(256), pk3_smem<KB, VPK, 1, 4, NST, true, true>(), st, U);
 }
 template <int KB, bool VPK, int NST, bool SKEW, bool QK8> static void pk3_set(cudaError_t& e) {
-  auto set = [&](const void* f, size_t smem) { const cudaError_t r = cudaFuncSetAttribute(f, cudaFuncAttributeMaxDynamicSharedMemorySize, (int)smem); if (r != cudaSuccess && e == cudaSuccess) e = r; };
-  set((const void*)q35_atxpk3_kernel<KB, VPK, 1, 4, NST, SKEW, SKEW ? 4 : 0, QK8>, pk3_smem<KB, VPK, 1, 4, NST, SKEW>());
-  set((const void*)q35_atxpk3_kernel<KB, VPK, 3, 4, NST, SKEW, 0, QK8>, pk3_smem<KB, VPK, 3, 4, NST, SKEW>());
-  set((const void*)q35_atxpk3_kernel<KB, VPK, 6, 2, NST, SKEW, 0, QK8>, pk3_smem<KB, VPK, 6, 2, NST, SKEW>());
+  auto set = [&](const void* f, size_t smem, size_t stat) { if ((int)(smem + stat) > pk_smem_limit()) return;   // skip variants whose static+dynamic LDS exceeds the device ceiling (inert on CUDA)
+    const cudaError_t r = cudaFuncSetAttribute(f, cudaFuncAttributeMaxDynamicSharedMemorySize, (int)smem); if (r != cudaSuccess && e == cudaSuccess) e = r; };
+  set((const void*)q35_atxpk3_kernel<KB, VPK, 1, 4, NST, SKEW, SKEW ? 4 : 0, QK8>, pk3_smem<KB, VPK, 1, 4, NST, SKEW>(), pk3_static<1>());
+  set((const void*)q35_atxpk3_kernel<KB, VPK, 3, 4, NST, SKEW, 0, QK8>, pk3_smem<KB, VPK, 3, 4, NST, SKEW>(), pk3_static<3>());
+  set((const void*)q35_atxpk3_kernel<KB, VPK, 6, 2, NST, SKEW, 0, QK8>, pk3_smem<KB, VPK, 6, 2, NST, SKEW>(), pk3_static<6>());
 }
 template <int KB, bool VPK, int NST, bool SKEW, bool QK8> static void pk3_go(const Q35AtxPkArgs& U, cudaStream_t st) {
   const int M = U.a.M, sp = U.a.splits;
   if (M <= 2) launch_k(q35_atxpk3_kernel<KB, VPK, 1, 4, NST, SKEW, SKEW ? 4 : 0, QK8>, dim3((M + 1) / 2, sp, Q35_KVH), dim3(SKEW ? 256 : 128), pk3_smem<KB, VPK, 1, 4, NST, SKEW>(), st, U);
+#if defined(__HIP_PLATFORM_AMD__)
+  // gfx1100 (64KB LDS): pick the largest row shape whose static+dynamic LDS fits the device
+  // instead of failing the launch. CUDA keeps the original M-based selection below.
+  else if (pk_smem_limit() >= (int)(pk3_smem<KB, VPK, 6, 2, NST, SKEW>() + pk3_static<6>()))
+    launch_k(q35_atxpk3_kernel<KB, VPK, 6, 2, NST, SKEW, 0, QK8>, dim3((M + 15) / 16, sp, Q35_KVH), dim3(384), pk3_smem<KB, VPK, 6, 2, NST, SKEW>(), st, U);
+  else if (pk_smem_limit() >= (int)(pk3_smem<KB, VPK, 3, 4, NST, SKEW>() + pk3_static<3>()))
+    launch_k(q35_atxpk3_kernel<KB, VPK, 3, 4, NST, SKEW, 0, QK8>, dim3((M + 7) / 8, sp, Q35_KVH), dim3(384), pk3_smem<KB, VPK, 3, 4, NST, SKEW>(), st, U);
+  else launch_k(q35_atxpk3_kernel<KB, VPK, 1, 4, NST, SKEW, SKEW ? 4 : 0, QK8>, dim3((M + 1) / 2, sp, Q35_KVH), dim3(SKEW ? 256 : 128), pk3_smem<KB, VPK, 1, 4, NST, SKEW>(), st, U);
+#else
   else if (M <= 8) launch_k(q35_atxpk3_kernel<KB, VPK, 3, 4, NST, SKEW, 0, QK8>, dim3((M + 7) / 8, sp, Q35_KVH), dim3(384), pk3_smem<KB, VPK, 3, 4, NST, SKEW>(), st, U);
   else launch_k(q35_atxpk3_kernel<KB, VPK, 6, 2, NST, SKEW, 0, QK8>, dim3((M + 15) / 16, sp, Q35_KVH), dim3(384), pk3_smem<KB, VPK, 6, 2, NST, SKEW>(), st, U);
+#endif
 }
 template <int KB, bool VPK, bool QK8> static void pk3_launch2(const Q35AtxPkArgs& U, cudaStream_t st) {
   const int nst = pk3_nst_env(); const bool skew = pk3_skew_env() != 0;

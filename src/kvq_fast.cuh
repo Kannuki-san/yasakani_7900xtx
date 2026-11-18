@@ -240,12 +240,16 @@ static int tbf_vit2_env() { static const int v = [] { const char* f = std::geten
 void launch_tb_fast(const TbFastArgs& A, cudaStream_t st) {
   if (A.nrow <= 0) return;
   if (A.has_cdq && (A.stage & 1)) {
-    if ((A.has_cdq & 2) && !A.vit2_off && tbf_vit2_env()) {                  
+    if ((A.has_cdq & 2) && !A.vit2_off && tbf_vit2_env()) {
       tbf2_vit_kernel<<<(A.nrow * A.nm * 2 + 3) / 4, 128, 0, st>>>(A);
-      if (A.has_cdq & 4) { TbFastArgs L = A; L.k3_only = 1; tbf_vit_kernel<<<L.nrow * L.nm * 4, 256, 0, st>>>(L); }
-    } else tbf_vit_kernel<<<A.nrow * A.nm * 4, 256, 0, st>>>(A);
+      kdbg_check((const void*)tbf2_vit_kernel, dim3((A.nrow * A.nm * 2 + 3) / 4), dim3(128), 0);
+      if (A.has_cdq & 4) { TbFastArgs L = A; L.k3_only = 1; tbf_vit_kernel<<<L.nrow * L.nm * 4, 256, 0, st>>>(L);
+        kdbg_check((const void*)tbf_vit_kernel, dim3(L.nrow * L.nm * 4), dim3(256), 0); }
+    } else { tbf_vit_kernel<<<A.nrow * A.nm * 4, 256, 0, st>>>(A);
+      kdbg_check((const void*)tbf_vit_kernel, dim3(A.nrow * A.nm * 4), dim3(256), 0); }
   }
-  if (A.stage & 2) tbf_sel_kernel<<<A.nrow, 256, 0, st>>>(A);
+  if (A.stage & 2) { tbf_sel_kernel<<<A.nrow, 256, 0, st>>>(A);
+    kdbg_check((const void*)tbf_sel_kernel, dim3(A.nrow), dim3(256), 0); }
 }
 TbHost& tbf_host() { static TbHost h; return h; }
 } 

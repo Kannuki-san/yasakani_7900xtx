@@ -1,5 +1,6 @@
 // SPDX-License-Identifier: Apache-2.0
 // Copyright (c) 2026 the YASAKANI authors
+#include "gpu_arch.cuh"
 #include "pdl.cuh"
 #include <cuda_fp16.h>
 #include <cfloat>
@@ -193,7 +194,7 @@ __global__ void __launch_bounds__(256) prefetch_kernel(const PfEntry* plan, int 
     const char* base = reinterpret_cast<const char*>(E.p);
     const size_t lines = (E.bytes + 127) / 128;
     for (size_t i = blockIdx.x * (size_t)blockDim.x + threadIdx.x; i < lines; i += (size_t)gridDim.x * blockDim.x)
-      asm volatile("prefetch.global.L2 [%0];" :: "l"(base + i * 128));
+      yskn::arch::prefetch_l2(base + i * 128);
   }
 }
 void launch_prefetch(const PfEntry* plan, int n, const int* prog, int ctas, cudaStream_t st) { prefetch_kernel<<<ctas, 256, 0, st>>>(plan, n, prog); }

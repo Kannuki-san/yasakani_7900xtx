@@ -1,5 +1,6 @@
 // SPDX-License-Identifier: Apache-2.0
 // Copyright (c) 2026 the YASAKANI authors
+#include "gpu_arch.cuh"
 #include "pdl.cuh"
 #include <cuda_bf16.h>
 #include "q35.hpp"
@@ -18,28 +19,13 @@ namespace {
 constexpr int FA_KT = 32, FA_LD = Q35_HD + 8;                      
 constexpr int FA_SMEM = 2 * 2 * FA_KT * FA_LD * 2;                  
 constexpr float FA_LOG2E = 1.4426950408889634f;
-__device__ __forceinline__ void fa_mma(float* c, const unsigned* a, unsigned b0, unsigned b1) {
-  asm volatile("mma.sync.aligned.m16n8k16.row.col.f32.bf16.bf16.f32 {%0,%1,%2,%3}, {%4,%5,%6,%7}, {%8,%9}, {%0,%1,%2,%3};\n"
-               : "+f"(c[0]), "+f"(c[1]), "+f"(c[2]), "+f"(c[3]) : "r"(a[0]), "r"(a[1]), "r"(a[2]), "r"(a[3]), "r"(b0), "r"(b1));
-}
-__device__ __forceinline__ void fa_ldm4(unsigned* r, const void* p) {
-  const unsigned s = (unsigned)__cvta_generic_to_shared(p);
-  asm volatile("ldmatrix.sync.aligned.m8n8.x4.shared.b16 {%0,%1,%2,%3}, [%4];\n" : "=r"(r[0]), "=r"(r[1]), "=r"(r[2]), "=r"(r[3]) : "r"(s));
-}
-__device__ __forceinline__ void fa_ldm4t(unsigned* r, const void* p) {
-  const unsigned s = (unsigned)__cvta_generic_to_shared(p);
-  asm volatile("ldmatrix.sync.aligned.m8n8.x4.trans.shared.b16 {%0,%1,%2,%3}, [%4];\n" : "=r"(r[0]), "=r"(r[1]), "=r"(r[2]), "=r"(r[3]) : "r"(s));
-}
-__device__ __forceinline__ void fa_cp16(void* smem, const void* gmem) {
-  const unsigned s = (unsigned)__cvta_generic_to_shared(smem);
-  asm volatile("cp.async.cg.shared.global [%0], [%1], 16;\n" :: "r"(s), "l"(gmem));
-}
-__device__ __forceinline__ void fa_cp4(void* smem, const void* gmem) {
-  const unsigned s = (unsigned)__cvta_generic_to_shared(smem);
-  asm volatile("cp.async.ca.shared.global [%0], [%1], 4;\n" :: "r"(s), "l"(gmem));
-}
-__device__ __forceinline__ void fa_commit() { asm volatile("cp.async.commit_group;\n" ::); }
-__device__ __forceinline__ void fa_wait1() { asm volatile("cp.async.wait_group 1;\n" ::); }
+__device__ __forceinline__ void fa_mma(float* c, const unsigned* a, unsigned b0, unsigned b1) { yskn::arch::mma_bf16(c, a, b0, b1); }
+__device__ __forceinline__ void fa_ldm4(unsigned* r, const void* p) { yskn::arch::ldm4(r, p); }
+__device__ __forceinline__ void fa_ldm4t(unsigned* r, const void* p) { yskn::arch::ldm4t(r, p); }
+__device__ __forceinline__ void fa_cp16(void* smem, const void* gmem) { yskn::arch::cp16(smem, gmem); }
+__device__ __forceinline__ void fa_cp4(void* smem, const void* gmem) { yskn::arch::cp4(smem, gmem); }
+__device__ __forceinline__ void fa_commit() { yskn::arch::cp_commit(); }
+__device__ __forceinline__ void fa_wait1() { yskn::arch::cp_wait<1>(); }
 __device__ __forceinline__ unsigned fa_pack(float lo, float hi) {
   const __nv_bfloat162 v = __floats2bfloat162_rn(lo, hi); return *reinterpret_cast<const unsigned*>(&v);
 }
