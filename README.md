@@ -26,6 +26,30 @@ A local LLM engine for **Windows** and **one NVIDIA RTX GPU** (tested on the **R
 >
 > **Support the development:** crowdfunding on CAMPFIRE for backers living in Japan, until December 16, 2026 - https://camp-fire.jp/projects/992233/view (outside Japan: see [Support](#support))
 
+## AMD HIP backend (this fork)
+
+This fork (`YASAKANI_7900xtx`) adds a native AMD ROCm/HIP backend **alongside** the upstream NVIDIA CUDA backend. The CUDA backend is unchanged; the HIP backend is selected at build time (`-DYSKN_BACKEND=HIP`) and runs the same model files, quantization and inference algorithm. It is built and tuned for the **Radeon RX 7900 XTX (gfx1100, RDNA3, wave32)** on Linux.
+
+**Implemented:**
+- Native WMMA GEMV/GEMM (trellis weight decode + int8 matrix multiply), LDS-staged for the 64 KB shared-memory limit.
+- Native trellis/pk3 compressed-KV attention and INT8-row KV attention (online softmax, native WMMA layout).
+- hipBLAS int8 per-group prefill GEMM (reusing the trellis weight predecode and cache), about 18× the initial HIP port.
+- AMD GPU detection in Python (sysfs / rocm-smi), CLI / serve / chat, and image input through the llama.cpp b10488 CPU encoder.
+
+**Build and run (Linux, ROCm 7.1 / hipcc):**
+
+```bash
+cmake -S . -B build -G Ninja -DCMAKE_BUILD_TYPE=Release \
+      -DYSKN_BACKEND=HIP -DYSKN_KVX_MODE=3 -DCMAKE_HIP_COMPILER=/usr/lib/llvm-21/bin/clang
+cmake --build build -j6
+yasakani info  --model-dir <model> --dll build/bin/libyskn.so
+yasakani serve --model-dir <model> --dll build/bin/libyskn.so
+```
+
+Details, kill switches and the verification status: [backends/hip/README.md](backends/hip/README.md) and [BUILDING.md](BUILDING.md).
+
+**Verified on the RX 7900 XTX** against the RTX 5090 reference: `selfcheck` top-1 98.9% (trellis KV5) / 99.3% (bf16 KV), prefill 8K ≈ 543 tok/s and 78K ≈ 199 tok/s, decode speed and speculative accept rate unchanged, image recognition, and up to 256K context within 24 GB. **Not yet tested:** other AMD GPUs, the CUDA backend on NVIDIA hardware in this fork, and the GPU vision projector (`YASAKANI_VISION_GPU=1`) on AMD.
+
 ## What it is
 
 YASAKANI runs Qwen3.8-27B on your own PC. In a comparison with eight other engines on the same PC (one RTX 5090, Qwen3.8-27B, one request at a
