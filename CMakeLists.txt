@@ -1,5 +1,5 @@
 cmake_minimum_required(VERSION 3.24)
-# GPU backend: CUDA (NVIDIA, the release build) or HIP (AMD Radeon, native port in progress).
+# GPU backend: CUDA (NVIDIA, the release build) or HIP (AMD Radeon, native RDNA3 backend).
 set(YSKN_BACKEND "CUDA" CACHE STRING "GPU backend: CUDA or HIP")
 if(YSKN_BACKEND STREQUAL "HIP")
   # RDNA3 (gfx1100 = RX 7900 XTX). wave32 is the native width and matches CUDA's warp size.
@@ -65,9 +65,9 @@ set(YSKN_SOURCES
 set(YSKN_KVX_MODE 3 CACHE STRING "KV codec mode: 0=bf16 plain attention, 1=fp8, 2/3=rotated INT8 (3=trellis)")
 add_library(yskn SHARED ${YSKN_SOURCES})
 if(YSKN_BACKEND STREQUAL "HIP")
-  # Same sources, compiled as HIP; the shim headers in src/hip_shim map cuda* names to hip*.
+  # Same sources, compiled as HIP; the shim headers in backends/hip/shim map cuda* names to hip*.
   set_source_files_properties(${YSKN_SOURCES} PROPERTIES LANGUAGE HIP)
-  target_include_directories(yskn PRIVATE src/hip_shim src include third_party)
+  target_include_directories(yskn PRIVATE backends/hip/shim src include third_party)
   target_compile_definitions(yskn PRIVATE YSKN_BUILD YSKN_KVX_MODE=${YSKN_KVX_MODE} NOMINMAX)
   # -ffp-contract=off is the HIP equivalent of nvcc --fmad=false (keeps the arithmetic identical to the reference).
   # -include: nvcc implicitly includes cuda_runtime.h in every TU; HIP does not, so force the shim (which includes hip_runtime.h).

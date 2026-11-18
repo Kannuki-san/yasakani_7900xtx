@@ -2,6 +2,7 @@
 // Copyright (c) 2026 the YASAKANI authors
 // CUDA -> HIP name compatibility shim (HIP backend only; found via include path before the real headers).
 // The engine source stays single-source: CUDA builds use the real NVIDIA headers, HIP builds use this shim.
+// Only names the engine actually uses are mapped; add a mapping here when new CUDA API use is introduced.
 #pragma once
 #include <hip/hip_runtime.h>
 // Include the fp16/bf16 headers BEFORE the name macros below: they declare warp-sync functions
@@ -11,14 +12,12 @@
 
 // types
 #define cudaError_t                  hipError_t
-#define cudaError                    hipError
 #define cudaStream_t                 hipStream_t
 #define cudaEvent_t                  hipEvent_t
 #define cudaGraph_t                  hipGraph_t
 #define cudaGraphExec_t              hipGraphExec_t
 #define cudaDeviceProp               hipDeviceProp_t
 #define cudaFuncAttributes           hipFuncAttributes
-#define cudaMemcpyKind               hipMemcpyKind
 #define cudaLaunchConfig_t           hipLaunchConfig_t
 #define cudaLaunchAttribute          hipLaunchAttribute
 
@@ -59,8 +58,6 @@ inline hipError_t cudaFreeHost(void* p) { return hipHostFree(p); }
 #define cudaMemcpy                   hipMemcpy
 #define cudaMemcpyAsync              hipMemcpyAsync
 #define cudaMemcpyToSymbolAsync      hipMemcpyToSymbolAsync
-#define cudaMemcpyFromSymbol         hipMemcpyFromSymbol
-#define cudaMemcpyToSymbol           hipMemcpyToSymbol
 #define cudaStreamIsCapturing        hipStreamIsCapturing
 #define cudaStreamCaptureStatus      hipStreamCaptureStatus
 #define cudaStreamCaptureStatusActive hipStreamCaptureStatusActive

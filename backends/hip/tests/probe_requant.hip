@@ -4,7 +4,7 @@
 // independent CPU Viterbi reference (test_requant_ref.py) can verify the
 // encode side. Links against libyskn.so (no CUDA sources compiled here).
 //
-// Build: hipcc -O3 -std=c++17 --offload-arch=gfx1100 -I src/hip_shim -I src \
+// Build: hipcc -O3 -std=c++17 --offload-arch=gfx1100 -I backends/hip/shim -I src \
 //        -include cuda_runtime.h probe_requant.hip -o probe_requant \
 //        -L build-integ/bin -lyskn -Wl,-rpath,$PWD/build-integ/bin
 // Run:   ./probe_requant <kvq_u5.bin> <out.bin>   (env YSKN_TB_VIT2=0/1)
