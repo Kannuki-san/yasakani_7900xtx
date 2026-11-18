@@ -281,10 +281,20 @@ template <int MB, bool BG, bool PN> static int g6_prepare_kernel(int sms) {
   return sms * per;
 }
 void q35_g6_prepare(Q35G6Workspace& W, int sms) {
+#if defined(__HIP_PLATFORM_AMD__)
+  // mt_gemm6 is unusable on gfx1100 (measured): 585-2289 VGPR spills and the 55KB
+  // dynamic-LDS launch fails with "invalid argument". Keep resident[] = 0 so
+  // launch_q35_g6 always declines; the engine then uses the hipBLAS prefill GEMM
+  // (backends/hip/prefill) or PFA when that is killed. The weight workspace is
+  // still allocated by the engine and used by layer_prepare/prefill_vsp for the
+  // trellis->int8 predecode cache, which the hipBLAS path reuses.
+  (void)sms;
+#else
   W.resident[0] = g6_prepare_kernel<4, false, false>(sms);
   W.resident[1] = g6_prepare_kernel<4, false, true>(sms);
   W.resident[2] = g6_prepare_kernel<2, true, false>(sms);
   W.resident[3] = g6_prepare_kernel<2, true, true>(sms);
+#endif
   int cap = *std::max_element(W.resident, W.resident + 4);
   W.partial_bytes = (size_t)(cap + 1) * G6_NT * G6C<4>::NACC * sizeof(long long);
   W.flags_bytes = (size_t)(cap + 1) * 2 * sizeof(int);
@@ -306,6 +316,15 @@ void q35_g6_decode(const TensorDev& t, uint4* dst, cudaStream_t st) {
 bool launch_q35_g6(const GemvLaunch& P, Q35G6Workspace& W, int pm, cudaStream_t st) {
   if (!W.weights || P.M < 256 || !P.xsum || P.lo || P.fuse || P.draft || P.e_fuse || P.f_mode || P.xsm_part || P.n_seg < 1 || P.n_seg > 3)
     return false;
+#if defined(__HIP_PLATFORM_AMD__)
+  // gfx1100: q35_g6_prepare keeps resident[]=0 because mt_gemm6 is unusable here
+  // (VGPR spills + dynamic-LDS launch failure). Decline BEFORE the recursive
+  // per-segment split below: that path throws when a split call declines, which
+  // would break the YSKN_HIP_PREFILL=0 kill switch (it must fall back to PFA
+  // cleanly, not abort). CUDA keeps the original behavior (resident[]>0 normally).
+  if (W.resident[0] == 0 && W.resident[1] == 0 && W.resident[2] == 0 && W.resident[3] == 0)
+    return false;
+#endif
   size_t bytes = 0, shape_bytes = 0; int nt = 0; bool pn = false; const int Kc = P.seg[0].t.Kc;
   if (Kc < 512 || Kc % 512) return false;
   Q35G6Args Q{}; Q.n_seg = P.n_seg; Q.R = P.M; Q.eps = P.xsm_eps; Q.us_out = P.us_out;
@@ -342,8 +361,13 @@ bool launch_q35_g6(const GemvLaunch& P, Q35G6Workspace& W, int pm, cudaStream_t 
     else if (t.k_default == 8) mt_predecode2_kernel<8><<<blocks, 256, 0, st>>>(t, dst);
     else mt_predecode2_kernel<4><<<blocks, 256, 0, st>>>(t, dst);
   }
-  if (Kc / 512 > G6_GP) { if (pn) g6_launch<2, true, true>(Q, W, st); else g6_launch<2, true, false>(Q, W, st); }
-  else { if (pn) g6_launch<4, false, true>(Q, W, st); else g6_launch<4, false, false>(Q, W, st); }
+  // Prefer MB=4 (Kc/512 <= G6_GP) when it fits the device; otherwise fall back to MB=2
+  // (55KB, fits gfx1100's 64KB). resident[]==0 marks a variant skipped at prepare time.
+  const bool mb4_ok = (W.resident[0] > 0 || W.resident[1] > 0);
+  if (Kc / 512 > G6_GP || !mb4_ok) {
+    if (W.resident[2] == 0 && W.resident[3] == 0) return false;   // no variant fits: lnord fallback
+    if (pn) g6_launch<2, true, true>(Q, W, st); else g6_launch<2, true, false>(Q, W, st);
+  } else { if (pn) g6_launch<4, false, true>(Q, W, st); else g6_launch<4, false, false>(Q, W, st); }
   return true;
 }
 }  
