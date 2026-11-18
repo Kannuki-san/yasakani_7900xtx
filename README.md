@@ -36,15 +36,22 @@ This fork (`YASAKANI_7900xtx`) adds a native AMD ROCm/HIP backend **alongside** 
 - hipBLAS int8 per-group prefill GEMM (reusing the trellis weight predecode and cache).
 - AMD GPU detection in Python (sysfs / rocm-smi), CLI / serve / chat, and image input through the llama.cpp b10488 CPU encoder.
 
-**Build and run (Linux, ROCm 7.1 / hipcc):**
+**Quick start (Linux):** download the prebuilt `yasakani-hip-<version>-linux-x86_64.tar.gz` from
+Releases, extract it, and run **`./start_amd.sh`** — it checks the setup, lets you pick a model and a
+mode (browser chat / terminal chat / API server), and reuses the existing CLI. Or build from source:
 
 ```bash
 cmake -S . -B build -G Ninja -DCMAKE_BUILD_TYPE=Release \
       -DYSKN_BACKEND=HIP -DYSKN_KVX_MODE=3 -DCMAKE_HIP_COMPILER=/usr/lib/llvm-21/bin/clang
 cmake --build build -j6
-yasakani info  --model-dir <model> --dll build/bin/libyskn.so
-yasakani serve --model-dir <model> --dll build/bin/libyskn.so
+./start_amd.sh --mode api --model <model>     # or: yasakani serve --model-dir <model> --dll build/bin/libyskn.so
 ```
+
+`start_amd.sh` modes: `--mode browser` (official web chat + opens the browser), `--mode terminal`
+(existing `yasakani chat`), `--mode api` (serve only, prints the URL, no browser). `--model`,
+`--help`, and the usual serve/chat options pass through. See the distribution README
+(`README.md` / `README.ja.md` inside the tar.gz) for prerequisites (ROCm 7.1 runtime, Python deps,
+model download) and the uv setup.
 
 Details, kill switches and the current status: [backends/hip/README.md](backends/hip/README.md) and [BUILDING.md](BUILDING.md).
 

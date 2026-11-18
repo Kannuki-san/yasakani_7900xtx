@@ -3,9 +3,43 @@
 **Windows** と **NVIDIA の RTX 1 枚**で、**Qwen3.8-27B** を速く動かすローカル AI エンジンです。動作を確かめたのは **RTX 5090** です。オープンソース（Apache License 2.0）。
 English: [README.md](README.md)
 
+> [!NOTE]
+> **AMD Radeon RX 7900 XTX (gfx1100) ネイティブHIPバックエンド — Linux専用**
+>
+> このフォークはYASAKANIに独立したAMD ROCm/HIPネイティブバックエンドを追加します（対象: AMD Radeon RX 7900 XTX / gfx1100 / RDNA3 / wave32）。**Linux専用**（ROCm 7.1 / hipcc・ソースからビルド）。上流のNVIDIA CUDAバックエンド（Windows）は変更せず維持し、AMD対応はそれを置き換えずに追加しています。
+>
+> 同じQwen3.8-27Bモデルファイルで動作: trellis KV5 / bf16 KVキャッシュ、投機デコード、画像入力（CPUエンコーダ）、24GB内で最大256Kコンテキスト。`yasakani selfcheck`はRTX 5090参照を再現（top-1 98.9% trellis / 99.3% bf16）、prefill ≈ 543 tok/s（8K）/ 199 tok/s（78K）。[BUILDING.md](BUILDING.md)・[backends/hip/README.md](backends/hip/README.md) 参照。
+>
+> 制限: gfx1100のみ（他AMD GPUは未検証）。CUDAバックエンドは上流のまま変更なしですが本フォークではNVIDIA実機で再検証していません。GPU visionプロジェクタ（`YASAKANI_VISION_GPU=1`）はAMD未検証（CPUエンコーダは動作）。
+
 > **バージョン 0.1.5（2026 年 11 月 16 日）。** この版は直しの版で、多くは寄稿です。JSON 形のツール呼び出しで引数の値に `<function=...>` があっても正しく読みます。1 つの依頼に同じ画像が 2 回あってもエンコードは 1 回です。`--dll` や `YASAKANI_DLL` が無いファイルを指すと、ほかの DLL を読まずにエラーで止まります（[#12](https://github.com/yasakani-dev/yasakani/pull/12)）。ツール呼び出しで真偽値と宣言した引数は Python の書き方の `True`／`False` も、null を許す引数は `None` も値として読みます（[#21](https://github.com/yasakani-dev/yasakani/pull/21)）。エンジンはモデルファイルの見出しの長さを 64 bit で読みます（[#14](https://github.com/yasakani-dev/yasakani/pull/14)）。`YSKN_Q35_ATX_SPLITS` を 31 未満にしたときも短い文脈の全体を見ます（既定の 42 では変わりません。[#15](https://github.com/yasakani-dev/yasakani/pull/15)）。1 つのプロセスで 2 つのエンジンが同時に生成するときは先読みの状態を分けます（[#13](https://github.com/yasakani-dev/yasakani/pull/13)）。GPU のコードは 0.1.4 と同じなので、速度表は変わりません。`--max-ctx` を指定したとき、その長さと並べて入らなければ補助モデルの出口の表を読み込みません（[#17](https://github.com/yasakani-dev/yasakani/pull/17)）。GPU が複数のパソコンでは、`--device N` が `yasakani info` と nvidia-smi の GPU N になりました（[#20](https://github.com/yasakani-dev/yasakani/issues/20)）。同じ GPU にモニターをつなぐと生成が遅くなることがある、と FAQ に書きました（[#18](https://github.com/yasakani-dev/yasakani/issues/18)）。0.1.4 で、編集が速くなり、長い入力を読み直すことが減りました。答えが入力を写すところでは、入力から写した続きを 1 回の計算で最大 64 トークンまとめて確かめます（これまで 16）。思考なしのコードと JSONL の編集は 0.1.2 の 1.67〜2.04 倍の速さになりました。思考なしのほかの課題は 0.96〜1.01 倍（同じ時に測った 0.1.3 の 0.99〜1.00 倍で、同じ速さ）で、答えは同じです（[速さ](#速さ)）。起動ファイルはダウンロードの前に NVIDIA のドライバーの版を確かめ、`yasakani selfcheck` は RTX 5090 以外の GPU も確かめるようになりました（[必要なもの](#必要なもの)）。同じ長い資料に続けて別の質問をするときも、資料を最初から読み直さなくなりました（資料が質問より前にあり、間にほかの依頼が無いとき。229,376 トークンの資料のあと、答え始めるまで 116 秒 → 0.37 秒。[長い文脈](#長い文脈)）。サーバーは `tool_choice` の `required` と関数の指定も受け付けます（呼び出しは強制しません）。llama.cpp と同じ形の `timings` も返します。Linux ではソースからビルドした llama.cpp で画像も使えます（3 つとも [#8](https://github.com/yasakani-dev/yasakani/pull/8) の寄稿。Linux の画像は私たちは試していません）。[BUILDING.md](BUILDING.md#linux-building-from-source) に Linux の節を作りました（[#10](https://github.com/yasakani-dev/yasakani/pull/10)・[#8](https://github.com/yasakani-dev/yasakani/pull/8)）。0.1.3 から、RTX 5090 以外の RTX 30・40・50 シリーズ（GPU のメモリ 16 GB 以上）でも動くように作りました。ただしこれらのカードではまだ動かしておらず、最適化もしていません（[必要なもの](#必要なもの)）。0.1.3 では、まれに途中から別の文章になる問題の原因も直しました（[品質](#品質)）。画像の入力は 0.1.2 から（任意。[#4](https://github.com/yasakani-dev/yasakani/pull/4) の寄稿）、ツール／関数呼び出し（`tools`）は 0.1.1 から対応しています。エンジン：[公開ページ](https://github.com/yasakani-dev/yasakani/releases/tag/v0.1.5)。モデル（Hugging Face）：[品質モデル](https://huggingface.co/yasakani-dev/Qwen3.8-27B-YASAKANI-quality)・[最速モデル](https://huggingface.co/yasakani-dev/Qwen3.8-27B-YASAKANI-speed)。
 >
 > **開発を応援してください：** CAMPFIRE でクラウドファンディングを行っています（2026 年 12 月 16 日まで）→ https://camp-fire.jp/projects/992233/view
+
+## AMD HIP バックエンド（このフォーク）
+
+このフォーク（`YASAKANI_7900xtx`）は、上流のNVIDIA CUDAバックエンドと**並べて**ネイティブAMD ROCm/HIPバックエンドを追加します。CUDAバックエンドは不変。HIPバックエンドはビルド時に選択（`-DYSKN_BACKEND=HIP`）し、同じモデルファイル・量子化・推論アルゴリズムを実行します。**Radeon RX 7900 XTX（gfx1100・RDNA3・wave32）**向けにビルド・調整、**Linux専用**（Windows HIPビルドはなし）。
+
+**実装済み:**
+- ネイティブWMMA GEMV/GEMM（trellis重み復号 + int8行列積）。64 KB共有メモリ上限向けLDS staging。
+- ネイティブtrellis/pk3圧縮KV attentionとINT8-row KV attention（online softmax・ネイティブWMMAレイアウト）。
+- hipBLAS int8 per-group prefill GEMM（trellis重みpredecodeとキャッシュを再利用）。
+- PythonでのAMD GPU検出（sysfs / rocm-smi）、CLI / serve / chat、llama.cpp b10488 CPUエンコーダによる画像入力。
+
+**クイックスタート（Linux）:** Releasesのビルド済み `yasakani-hip-<version>-linux-x86_64.tar.gz` をダウンロード・解凍し、**`./start_amd.sh`** を実行 — 環境チェック・モデルとモード（ブラウザチャット / ターミナルチャット / APIサーバー）選択・既存CLI再利用。またはソースからビルド:
+
+```bash
+cmake -S . -B build -G Ninja -DCMAKE_BUILD_TYPE=Release \
+      -DYSKN_BACKEND=HIP -DYSKN_KVX_MODE=3 -DCMAKE_HIP_COMPILER=/usr/lib/llvm-21/bin/clang
+cmake --build build -j6
+./start_amd.sh --mode api --model <model>     # または: yasakani serve --model-dir <model> --dll build/bin/libyskn.so
+```
+
+`start_amd.sh` モード: `--mode browser`（公式Webチャット＋ブラウザ起動）、`--mode terminal`（既存 `yasakani chat`）、`--mode api`（serveのみ・URL表示・ブラウザなし）。`--model`・`--help`・通常のserve/chatオプションはパススルー。前提（ROCm 7.1ランタイム・Python依存・モデルダウンロード）とuvセットアップは配布物内README（`README.md` / `README.ja.md`）参照。
+
+詳細・kill switch・現状: [backends/hip/README.md](backends/hip/README.md)・[BUILDING.md](BUILDING.md)。
+
+RX 7900 XTXでのRTX 5090参照との比較: `selfcheck` top-1 98.9%（trellis KV5）/ 99.3%（bf16 KV）、prefill 8K ≈ 543 tok/s・78K ≈ 199 tok/s、decode速度と投機accept率不変、画像認識、24GB内で最大256Kコンテキスト。**未検証:** 他AMD GPU、本フォークでのNVIDIA実機CUDAバックエンド、AMDでのGPU visionプロジェクタ（`YASAKANI_VISION_GPU=1`）。
 
 ## これは何か
 
@@ -186,7 +220,7 @@ GPU を使っていると（画面の描画が動いていた状態）、同じ�
 `bdraft2_k8.shead` を読み込まないので、RTX 5090 では 1 回の計算が約 3% 長くなりました）。各カードの実機での検証と最適化は、
 クラウドファンディングの目標です（[支援](#支援)）。お手元のカードでの結果の報告は歓迎します（[CONTRIBUTING.md](CONTRIBUTING.md)）。
 
-対応しないもの：AMD の GPU、Mac、メモリが 16 GB 未満の NVIDIA のカード、RTX 30 シリーズより古いカード（計算能力 8.6 未満）、ほかのモデル。
+上流が対応しないもの：Mac、メモリが 16 GB 未満の NVIDIA のカード、RTX 30 シリーズより古いカード（計算能力 8.6 未満）、ほかのモデル。**AMD の GPU：このフォークは Radeon RX 7900 XTX (gfx1100) 向けネイティブHIPバックエンドを追加しています — 冒頭のノートと [backends/hip/README.md](backends/hip/README.md) を参照。**
 
 **Linux**：ソースからビルドすれば動きます（[#3](https://github.com/yasakani-dev/yasakani/pull/3) の寄稿）。手順と確かめた環境は [BUILDING.md](BUILDING.md#linux-building-from-source)（英語）にあります。寄稿者が確かめた方法で、公式の対応ではありません。ビルド済みの Linux 版と起動ファイルはまだありません。公式の Linux 版（ビルド済みのファイル・起動ファイル・素の Linux での確認・サポート）はクラウドファンディングの目標の 1 つです。
 
