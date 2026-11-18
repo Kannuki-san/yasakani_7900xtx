@@ -203,6 +203,9 @@ Engine35::Engine35(const std::string& path, int max_ctx, int flags) : flags_(fla
       if (n >= 512 && n <= 2048 && n % 64 == 0) Pmax_=n; } }
   PM_ = Pmax_;
   {const char* e=std::getenv("YSKN_Q35_LAYER_ROWS");if(e)layer_rows_=std::max(0,std::min(16384,std::atoi(e)));
+#if defined(__HIP_PLATFORM_AMD__)
+   else layer_rows_=2048;   // HIP default: enable the prefill_vsp super-chunk path (per-layer weight predecode cache; measured 543 vs 255 tok/s at 8K). Kill: YSKN_Q35_LAYER_ROWS=0. CUDA default (0) unchanged.
+#endif
    const char* o=std::getenv("YSKN_Q35_LAYER_OVERLAP");if(o)ovl_=std::atoi(o)!=0;}                              
   { const char* e = std::getenv("YSKN_Q35_KV8"); if (e && e[0]) kv8_ = std::atoi(e); }
   { const char* e = std::getenv("YSKN_Q35_KV_FP16"); if (e && e[0]) kv_fp16_ = std::atoi(e) != 0; }
@@ -335,7 +338,16 @@ Engine35::Engine35(const std::string& path, int max_ctx, int flags) : flags_(fla
     }
     head_.part = dz35<float>((size_t)head_.dev.n_workers * HM_ * head_.dev.N * 4); }
   
-  { const char* e = std::getenv("YSKN_Q35_G6"); if (e && std::atoi(e) != 0 && xsm_ && !xsm_part_) {
+  { const char* e = std::getenv("YSKN_Q35_G6");
+#if defined(__HIP_PLATFORM_AMD__)
+    // HIP default ON: the workspace feeds layer_prepare/prefill_vsp's trellis->int8
+    // predecode cache (reused by the hipBLAS prefill GEMM). mt_gemm6 itself stays
+    // disabled on gfx1100 (q35_g6_prepare: resident[]=0). Kill: YSKN_Q35_G6=0.
+    const bool g6_on = (!e || std::atoi(e) != 0) && xsm_ && !xsm_part_;
+#else
+    const bool g6_on = e && std::atoi(e) != 0 && xsm_ && !xsm_part_;   // CUDA default unchanged (opt-in)
+#endif
+    if (g6_on) {
       auto n = [](const DevTensor& t) { return (size_t)t.dev.N * t.dev.Kc; };
       for (const Q35Layer& Y : L_) g6_.weight_bytes = std::max({g6_.weight_bytes,
         n(Y.q), n(Y.k), n(Y.v), n(Y.qkv), n(Y.z), n(Y.o), n(Y.out), n(Y.gate), n(Y.up), n(Y.down)});
