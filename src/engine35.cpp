@@ -204,7 +204,9 @@ Engine35::Engine35(const std::string& path, int max_ctx, int flags) : flags_(fla
   PM_ = Pmax_;
   {const char* e=std::getenv("YSKN_Q35_LAYER_ROWS");if(e)layer_rows_=std::max(0,std::min(16384,std::atoi(e)));
 #if defined(__HIP_PLATFORM_AMD__)
-   else layer_rows_=2048;   // HIP default: enable the prefill_vsp super-chunk path (per-layer weight predecode cache; measured 543 vs 255 tok/s at 8K). Kill: YSKN_Q35_LAYER_ROWS=0. CUDA default (0) unchanged.
+   else layer_rows_=0;      // HIP default: graph prefill_chunks. Measured on gfx1100: chunks ~494 tok/s @8K vs vsp ~160 (3x); vsp's overlap kernel q35_state_nb needs 80KB dynamic LDS > 64KB and fails to launch (sticky error -> PFA fallback). Opt-in vsp: YSKN_Q35_LAYER_ROWS>0.
+#else
+   else layer_rows_=4096;   // CUDA default: prefill_vsp super-chunk (unchanged behavior; previously set via package env).
 #endif
    const char* o=std::getenv("YSKN_Q35_LAYER_OVERLAP");if(o)ovl_=std::atoi(o)!=0;}                              
   { const char* e = std::getenv("YSKN_Q35_KV8"); if (e && e[0]) kv8_ = std::atoi(e); }

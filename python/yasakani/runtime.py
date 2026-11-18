@@ -30,7 +30,8 @@ DEFAULT_ENV: Dict[str, str] = {
     "YSKN_Q35_KV8": "1",
     "YSKN_Q35_KV_FP16": "0",
     "YSKN_Q35_LAYER_OVERLAP": "1",
-    "YSKN_Q35_LAYER_ROWS": "4096",
+    # YSKN_Q35_LAYER_ROWS default now lives in the engine (engine35.cpp): CUDA=4096 (vsp),
+    # HIP=0 (graph prefill_chunks; vsp's state_nb needs 80KB LDS > gfx1100 64KB). Opt-in via env.
     "YSKN_Q35_PFALT": "1",
     "YSKN_Q35_PMAX": "1024",
     "YSKN_Q35_SHARED_WEIGHTS": "1",
