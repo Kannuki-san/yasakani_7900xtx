@@ -104,6 +104,56 @@ configurations (see `attention/README.md`). Gated diagnostics remain available:
   the development environment). Static preservation checks only; a CUDA
   build + run is required before any upstream PR.
 
+## Vision (image input)
+
+Image input is backend-neutral above the C ABI: Python encodes the image with
+llama.cpp b10488 (mtmd) and passes bfloat16 features through `yskn_set_visual`;
+the engine inserts them at the `<|image_pad|>` markers. No HIP-specific engine
+change was needed:
+
+- `q35_visual_rope_kernel` / `q35_visual_embed_kernel` (`src/q35_kernels.cu`)
+  are plain index/copy kernels — no WMMA, cp.async, shared memory or warp sync
+  — and compile unchanged for gfx1100. `Engine35::set_visual` uses only CUDA
+  names the shim maps (`cudaMemcpyAsync`, `cudaFree`, `cudaStreamSynchronize`,
+  `cudaGetLastError`). Both kernels (with gfx1100 kernel descriptors) and
+  `yskn_set_visual` are present in the GPU-verified HIP library.
+- **CPU encoder first (the default)**: the projector runs on the CPU through
+  llama.cpp b10488 built as shared libraries *without any GPU backend* —
+  verified here: the CPU encoder needs no ggml GPU backend. Recipe (upstream
+  BUILDING.md "Image input on Linux" minus `-DGGML_CUDA=ON`):
+
+  ```bash
+  git clone --depth 1 --branch b10488 https://github.com/ggml-org/llama.cpp llama-b10488-src
+  git -C llama-b10488-src rev-parse --short=9 HEAD    # must print 9d77fa172
+  cmake -S llama-b10488-src -B llama-b10488-build -G Ninja -DCMAKE_BUILD_TYPE=Release \
+        -DBUILD_SHARED_LIBS=ON -DLLAMA_CURL=OFF \
+        -DLLAMA_BUILD_TESTS=OFF -DLLAMA_BUILD_EXAMPLES=OFF -DLLAMA_BUILD_SERVER=OFF -DLLAMA_BUILD_TOOLS=ON \
+        -DCMAKE_INSTALL_RPATH='$ORIGIN' -DCMAKE_BUILD_WITH_INSTALL_RPATH=ON
+  cmake --build llama-b10488-build --target mtmd
+  mkdir llama-b10488 && cp -a llama-b10488-build/bin/lib*.so* llama-b10488/
+  ```
+
+  `check_build` accepts the result (ggml 0.20.2, commit 9d77fa1). The
+  prebuilt llama.cpp libraries of other vendors (e.g. LM Studio backends) are
+  other releases and are refused — build b10488 unchanged.
+- **GGUF files**: `--mmproj` must be the Qwen3.8-27B projector
+  (`clip.vision.projection_dim` 5120). `--vision-model` is opened `no_alloc`:
+  only settings and vocabulary are read, never weights, so any Qwen3.8-27B
+  GGUF works — verified with a Q4_K_M quant; no full-precision GGUF is needed.
+- CPU encoder verification (this fork, 6 threads): features `(n, 5120)` uint16
+  bfloat16, finite, mtmd positions validated; 640x480 → 300 tokens (3.2 s),
+  1920x1080 → 1008 tokens under the default 1024 limit (15.4 s). Opt-in test
+  (skipped without the files): `YASAKANI_TEST_LLAMA_DIR=... YASAKANI_TEST_MMPROJ=...
+  YASAKANI_TEST_VISION_MODEL=... python -m unittest tests.test_vision`.
+- `YASAKANI_VISION_GPU=1` (projector on the GPU) stays upstream-experimental
+  and is **unverified on AMD**: it would need a llama.cpp b10488 build with
+  `-DGGML_HIP=ON` (`GPU_TARGETS=gfx1100`), which was not built here. The CPU
+  encoder is the supported path.
+- End-to-end image → generation on gfx1100: `yasakani serve` with `--mmproj`,
+  `--llama-dir`, `--vision-model` and the HIP `libyskn.so` (`YASAKANI_DLL`),
+  then an OpenAI-style chat request with an `image_url` part (the `chat`
+  subcommand is text-only, as upstream).
+
 ## Verification status (gfx1100, v0.1.5 integration base)
 
 - Correctness: all 13 tensors × M=17..512 ALL EXACT (bit-exact vs the lnord
