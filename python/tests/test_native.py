@@ -78,3 +78,19 @@ class NativeTests(unittest.TestCase):
             with mock.patch.object(_native.C, "CDLL", side_effect=load):
                 _native.NativeLib(str(stub))
         self.assertEqual(seen, ["PCI_BUS_ID"])
+
+
+class HipLibraryTests(unittest.TestCase):
+    """The HIP engine library (the AMD-native backend) binds through the same C ABI.  YASAKANI_HIP_DLL names it; skipped when not
+    given, so the suite never needs ROCm.  Loading only dlopens the library: no GPU is touched (that happens at yskn_open)."""
+
+    def test_hip_dll_binds(self):
+        p = os.environ.get("YASAKANI_HIP_DLL")
+        if not p or not Path(p).is_file():
+            self.skipTest("set YASAKANI_HIP_DLL to the HIP libyskn.so to check its bindings")
+        lib = _native.NativeLib(p)
+        for name in _native.SIGNATURES:
+            self.assertIn(name, lib.fn)
+        for name in ("yskn_set_visual", "yskn_prepare_wide", "yskn_verify_nll", "yskn_verify", "yskn_commit", "yskn_logits_rows"):
+            self.assertIn(name, lib.fn)          # the optional exports the HIP build has too
+        # HIP-specific extras (yskn_test_hip_prefill, yskn_kprof_dump) are not bound: their absence on CUDA must not matter
