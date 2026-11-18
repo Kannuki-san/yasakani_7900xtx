@@ -1,18 +1,22 @@
 # YASAKANI_7900xtx
 
-> [!WARNING]
-> **🚧 Work in Progress — Not Yet Functional**
+> [!NOTE]
+> **AMD Radeon RX 7900 XTX (gfx1100) native HIP backend — functional and verified**
 >
-> This project is an experimental Linux/HIP port of YASAKANI targeting the AMD Radeon RX 7900 XTX.
+> This fork adds an independent AMD ROCm/HIP native backend to YASAKANI, targeting the AMD Radeon RX 7900 XTX (gfx1100, RDNA3, wave32) on Linux. The upstream NVIDIA CUDA backend is preserved unchanged; AMD support is added without replacing it.
 >
-> The port is currently under active development and is **not yet ready for use**. Core functionality is still being implemented and validated.
+> Verified on the RX 7900 XTX against the RTX 5090 reference: `yasakani selfcheck` top-1 agreement 98.9% (trellis KV5) / 99.3% (bf16 KV), prefill about 18× the initial HIP port (8K ≈ 543 tok/s, 78K ≈ 199 tok/s), speculative decoding, image input (CPU encoder), and up to 256K context within 24 GB. Build from source with ROCm 7.1 / hipcc — see [BUILDING.md](BUILDING.md) and [backends/hip/README.md](backends/hip/README.md).
+>
+> Limits: tested on gfx1100 only (other AMD GPUs are untested); the CUDA backend is unchanged from upstream but has not been re-verified on NVIDIA hardware in this fork; the GPU vision projector (`YASAKANI_VISION_GPU=1`) is unverified on AMD (the CPU encoder works).
 
 
-> **🚧 開発中 現在動作非対応**
+> **AMD Radeon RX 7900 XTX (gfx1100) ネイティブHIPバックエンド — 動作確認済み**
 >
-> このプロジェクトは、YASAKANIをLinux環境のAMD Radeon RX 7900 XTX向けに移植する実験的なプロジェクトです。
+> このフォークはYASAKANIに独立したAMD ROCm/HIPネイティブバックエンドを追加します（対象: AMD Radeon RX 7900 XTX / gfx1100 / RDNA3 / wave32・Linux）。上流のNVIDIA CUDAバックエンドは変更せず維持し、AMD対応はそれを置き換えずに追加しています。
 >
-> 現在も開発・検証を進めており、現時点では正常な動作はせず、実用できる状態ではありません。 主要機能の実装および検証を進めています。
+> RX 7900 XTXでRTX 5090参照に対し検証済み: `yasakani selfcheck` top-1一致 98.9%（trellis KV5）/ 99.3%（bf16 KV）、prefillは初期HIP移植比 約18倍（8K ≈ 543 tok/s・78K ≈ 199 tok/s）、投機デコード、画像入力（CPUエンコーダ）、24GB内で最大256Kコンテキスト。ROCm 7.1 / hipccでソースからビルド — [BUILDING.md](BUILDING.md)・[backends/hip/README.md](backends/hip/README.md) 参照。
+>
+> 制限: gfx1100のみ検証（他AMD GPUは未検証）。CUDAバックエンドは上流のまま変更なしですが、本フォークではNVIDIA実機で再検証していません。GPU visionプロジェクタ（`YASAKANI_VISION_GPU=1`）はAMD未検証（CPUエンコーダは動作）。
 
 
 A local LLM engine for **Windows** and **one NVIDIA RTX GPU** (tested on the **RTX 5090**), built for one model: **Qwen3.8-27B**. Open source, Apache License 2.0.
@@ -234,8 +238,8 @@ table `bdraft2_k8.shead` is then left out, which made each pass about 3% slower 
 each of these cards is a goal of the crowdfunding campaign; see [Support](#support). Results from your card are welcome
 ([CONTRIBUTING.md](CONTRIBUTING.md)).
 
-Not supported: AMD GPUs, Macs, NVIDIA cards with less than 16 GB, cards older than the RTX 30 series (compute capability below 8.6),
-other models.
+Not supported by upstream: Macs, NVIDIA cards with less than 16 GB, cards older than the RTX 30 series (compute capability below 8.6),
+other models. **AMD GPUs: this fork adds a native HIP backend for the Radeon RX 7900 XTX (gfx1100) — see the note at the top and [backends/hip/README.md](backends/hip/README.md).**
 
 **Linux:** the engine can be built from source (contributed in [#3](https://github.com/yasakani-dev/yasakani/pull/3)); the steps and the tested setups are in
 [BUILDING.md](BUILDING.md#linux-building-from-source). This is building from source, tested by contributors, not an official release: there is no
