@@ -177,6 +177,9 @@ __global__ void __launch_bounds__((NR > 1 ? NR : (UWX ? UWX : lno_uw<MT>())) * 3
   constexpr int NU = K / 2, T = 12 - K, TS = 3 * K - 12;
   constexpr unsigned PM = (1u << (2 * K)) - 1u, TM = (1u << T) - 1u;
   __shared__ __align__(16) uint16_t s_lut[4096];
+#if defined(__HIP_PLATFORM_AMD__)
+  __shared__ __align__(16) unsigned s_astage[128 * 5];   // A-fragment LDS transpose staging, per-thread (4 warps separated)
+#endif
   int seg = 0; while (seg + 1 < P.n_seg && (int)blockIdx.x >= P.seg[seg + 1].cta_begin) ++seg;
   const GemvSeg& Sg = P.seg[seg]; const TensorDev& t = Sg.t;
   const int warp = threadIdx.x >> 5;
@@ -221,10 +224,12 @@ __global__ void __launch_bounds__((NR > 1 ? NR : (UWX ? UWX : lno_uw<MT>())) * 3
   constexpr int NB = (MT + 7) / 8;                                    
   const int src = (lane & ~3) | ((tig + 3) & 3);                       
   float pacc[NB][4]; long long acc64[XSM ? NB : 1][4]; int d[NB][4]; float rm[NB][2];
+  yskn::arch::mma_s8_acc macc[NB];
   #pragma unroll
   for (int nb = 0; nb < NB; ++nb) {
     #pragma unroll
     for (int q = 0; q < 4; ++q) { pacc[nb][q] = 0.f; d[nb][q] = 0; if (XSM) acc64[nb][q] = 0; }
+    yskn::arch::mma_s8_acc_zero(macc[nb]);
     if (XSM && G > 64) {
       #pragma unroll
       for (int k = 0; k < 2; ++k) { const int tk = 8 * nb + 2 * tig + k; rm[nb][k] = tk < M ? lno_xsm_rm(P.alpha + (size_t)tk * G, G) : 0.f; }
@@ -303,16 +308,40 @@ __global__ void __launch_bounds__((NR > 1 ? NR : (UWX ? UWX : lno_uw<MT>())) * 3
       unsigned A[4];
       A[0] = pair_a(p10, q0); A[2] = pair_a(p20, p10 >> TS); A[1] = pair_a(p11, q1); A[3] = pair_a(p21, p11 >> TS);
       q0 = p20 >> TS; q1 = p21 >> TS;
+#if defined(__HIP_PLATFORM_AMD__)
+      // AMD-native: transpose the NVIDIA A fragment to WMMA layout via LDS (faster than ds_bpermute
+      // gather on RDNA3). Stride 5 avoids write bank conflicts; region is separate from s_lut and
+      // reused per m-step with full barriers guaranteeing write->read visibility and read->next-write safety.
+      #pragma unroll
+      for (int j = 0; j < 4; ++j) s_astage[threadIdx.x * 5 + j] = A[j];
+      __syncthreads();
+      const bool ah = (lane >= 17) && (lane & 1), au = (lane < 16 && !(lane & 1)) || ah;
+      const int rA = ah ? (lane - 17) / 2 : lane / 2;
+      yskn::arch::yskn_v4i A0 = {0, 0, 0, 0}, A1 = {0, 0, 0, 0};
+      if (au) {
+        #pragma unroll
+        for (int j = 0; j < 4; ++j) { const int st = (warp * 32 + 4 * rA + j) * 5; A0[j] = s_astage[st + (ah ? 1 : 0)]; A1[j] = s_astage[st + (ah ? 3 : 2)]; }
+      }
       #pragma unroll
       for (int nb = 0; nb < NB; ++nb) {
         if ((m & 1) == 0) xb[nb] = xp[nb] ? __ldg(xp[nb] + (LO ? (m >> 1) * 32 : (m >> 1))) : make_uint4(0u, 0u, 0u, 0u);
         const uint4& v = xb[nb];
-        lno_mma(d[nb], A, (m & 1) ? make_uint2(v.z, v.w) : make_uint2(v.x, v.y));
+        yskn::arch::mma_s8_acc_amd_prestaged(macc[nb], A0, A1, (m & 1) ? v.z : v.x, (m & 1) ? v.w : v.y);
       }
+      __syncthreads();
+#else
+      #pragma unroll
+      for (int nb = 0; nb < NB; ++nb) {
+        if ((m & 1) == 0) xb[nb] = xp[nb] ? __ldg(xp[nb] + (LO ? (m >> 1) * 32 : (m >> 1))) : make_uint4(0u, 0u, 0u, 0u);
+        const uint4& v = xb[nb];
+        yskn::arch::mma_s8_acc_mma(macc[nb], A, (m & 1) ? v.z : v.x, (m & 1) ? v.w : v.y);
+      }
+#endif
     }
     if (blk == 1) {                                                   
       #pragma unroll
       for (int nb = 0; nb < NB; ++nb) {
+        yskn::arch::mma_s8_acc_load(macc[nb], d[nb]);
         const int t0 = 8 * nb + 2 * tig, t1 = t0 + 1;
         const float a0 = t0 < M ? __ldg(P.alpha + (size_t)t0 * G + g) : 0.f, a1 = t1 < M ? __ldg(P.alpha + (size_t)t1 * G + g) : 0.f;
         if (XSM) {
@@ -324,6 +353,7 @@ __global__ void __launch_bounds__((NR > 1 ? NR : (UWX ? UWX : lno_uw<MT>())) * 3
           if (t1 < M) { pacc[nb][1] = lno_madd(pacc[nb][1], a1, (float)d[nb][1]); pacc[nb][3] = lno_madd(pacc[nb][3], a1, (float)d[nb][3]); }
         }
         d[nb][0] = d[nb][1] = d[nb][2] = d[nb][3] = 0;
+        yskn::arch::mma_s8_acc_zero(macc[nb]);
       }
     }
   }
