@@ -43,6 +43,10 @@ extern "C" int yskn_logits_rows(yskn_engine* e, int row0, int n, float* out) { Y
 #endif
 extern "C" YSKN_TEST_API int yskn_test_xsum(yskn_engine* e, const char* name, int M, unsigned seed, int variant, long long* out4) {
   YSKN_TRY(if (!e->q) throw std::runtime_error("test_xsum: qwen3_5 engine only"); e->q->test_xsum(name, M, seed, variant, out4)) }
+#if defined(YSKN_HIP_PREFILL_GEMM)
+extern "C" YSKN_TEST_API int yskn_test_hip_prefill(yskn_engine* e, const char* name, int M, unsigned seed, long long* out4) {
+  YSKN_TRY(if (!e->q) throw std::runtime_error("test_hip_prefill: qwen3_5 engine only"); e->q->test_hip_prefill(name, M, seed, out4)) }
+#endif
 extern "C" YSKN_TEST_API int yskn_time_verify(yskn_engine* e, int M, int mask, int iters, float* ms) { YSKN_TRY(*ms = e->q ? e->q->time_verify(M, mask, iters) : e->e->time_verify(M, mask, iters)) }
 extern "C" int yskn_spec_generate(yskn_engine* e, const int32_t* prompt, int n_prompt, int n_gen, const int32_t* cfg, int n_cfg, int32_t* out_ids, double* stats, double* times_ms) {
   try {

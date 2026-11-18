@@ -79,6 +79,17 @@ if(YSKN_BACKEND STREQUAL "HIP")
   if(EXISTS "${YSKN_SQRT_CFG}")
     target_compile_options(yskn PRIVATE "SHELL:-Xclang -mlink-builtin-bitcode -Xclang ${YSKN_SQRT_CFG}")
   endif()
+  # AMD-native prefill GEMM (hipBLAS int8 per-group + fused dequant, backends/hip/prefill).
+  # Compiled in and enabled by default on HIP (GPU-verified: all-tensor bit-exact vs lnord,
+  # selfcheck 98.9%); kill switch YSKN_HIP_PREFILL=0 restores the PFA/lnord path.
+  # Decode (M<=16) stays on lnord; the CUDA build is unaffected.
+  option(YSKN_PREFILL_GEMM "Build the AMD-native hipBLAS prefill GEMM (gfx1100)" ON)
+  if(YSKN_PREFILL_GEMM)
+    target_sources(yskn PRIVATE backends/hip/prefill/hip_prefill.hip)
+    set_source_files_properties(backends/hip/prefill/hip_prefill.hip PROPERTIES LANGUAGE HIP)
+    target_compile_definitions(yskn PRIVATE YSKN_HIP_PREFILL_GEMM)
+    target_link_libraries(yskn PRIVATE hipblas)
+  endif()
   set_target_properties(yskn PROPERTIES LIBRARY_OUTPUT_DIRECTORY ${CMAKE_BINARY_DIR}/bin)
 else()
   target_include_directories(yskn PRIVATE src include third_party)

@@ -343,6 +343,27 @@ Engine35::Engine35(const std::string& path, int max_ctx, int flags) : flags_(fla
       g6_.weights = dz35<uint4>(g6_.weight_bytes); g6_.partial = dz35<long long>(g6_.partial_bytes); g6_.flags = dz35<int>(g6_.flags_bytes);
       std::fprintf(stderr, "[q35_g6] prefill only, temporary workspace %zu bytes\n", g6_.weight_bytes + g6_.partial_bytes + g6_.flags_bytes);
     } }
+#if defined(YSKN_HIP_PREFILL_GEMM)
+  { const char* e = std::getenv("YSKN_HIP_PREFILL");
+    // HIP default ON (GPU-verified: all-tensor bit-exact vs lnord, selfcheck 98.9%).
+    // Kill switch: YSKN_HIP_PREFILL=0 restores the PFA/lnord path. CUDA is unaffected
+    // (this whole block is compiled out without YSKN_HIP_PREFILL_GEMM).
+    if ((!e || std::atoi(e) != 0) && xsm_ && !xsm_part_) {
+      size_t arena = 0, tensor_b = 0, partial_b = 0;
+      for (const Q35Layer& Y : L_) {
+        std::vector<const DevTensor*> ts = Y.full ? std::vector<const DevTensor*>{&Y.q, &Y.k, &Y.v, &Y.o, &Y.gate, &Y.up, &Y.down}
+                                                  : std::vector<const DevTensor*>{&Y.qkv, &Y.z, &Y.out, &Y.gate, &Y.up, &Y.down};
+        size_t sum = 0;
+        for (const DevTensor* t : ts) {
+          const size_t z = (size_t)t->dev.N * t->dev.Kc;
+          sum += z; tensor_b = std::max(tensor_b, z);
+          partial_b = std::max(partial_b, (size_t)(t->dev.Kc / 512) * PM_ * t->dev.N * 4);
+        }
+        arena = std::max(arena, sum);
+      }
+      hip_pf_.init(arena, tensor_b, partial_b, PM_, st_);
+    } }
+#endif
   const int M = Pmax_;
   h_ = dz35<float>((size_t)M * H_ * 4); xn_ = dz35<uint16_t>((size_t)M * H_ * 2);
   qx_ = dz35<int8_t>((size_t)M * std::max(F_, Q35_Z)); alpha_ = dz35<float>((size_t)M * (std::max(F_, Q35_Z) / 512) * 4);
@@ -399,6 +420,9 @@ Engine35::Engine35(const std::string& path, int max_ctx, int flags) : flags_(fla
 }
 Engine35::~Engine35() {
   cudaStreamSynchronize(st2_); cudaStreamSynchronize(st_);
+#if defined(YSKN_HIP_PREFILL_GEMM)
+  hip_pf_.destroy();
+#endif
   if (kz_) { q35_set_pm(0, st_); q35_flow_set_pm(0, st_); pfa_set_pm(0, st_); cudaStreamSynchronize(st_); }   
                                                                        
   if (gexec_) cudaGraphExecDestroy(gexec_);
@@ -443,7 +467,10 @@ void Engine35::gemv(std::initializer_list<DevTensor*> ts, int M, bool normed, co
     if (normed && M > xw_rows_) { P.xsm_S = S_; P.xsm_sst = Q35_SST; P.xsm_nb = H_ / 512; P.xsm_n = (float)H_; P.xsm_eps = eps_; }
     if (xsm_part_ && M <= 16) for (DevTensor* t : ts) if (t->dev.n_workers > 24) throw std::runtime_error("Engine35: XSUM partials need <= 24 workers"); }
   if (xw) { gemv_xw(P); return; }
-  if ((pfa_ && M > Mmax_) || (xsmc_ && M > 16)) {                       
+  if ((pfa_ && M > Mmax_) || (xsmc_ && M > 16)) {
+#if defined(YSKN_HIP_PREFILL_GEMM)
+    if (hip_pf_.ok && launch_hip_prefill(P, hip_pf_, smp_p_.pm, st_)) return;   // AMD-native prefill GEMM (env-gated at init)
+#endif
     if (!pfa_eligible(P)) throw std::runtime_error("Engine35: GEMM launch not PFA-eligible");
     if (launch_q35_g6(P, g6_, smp_p_.pm, st_)) return;
     launch_pfa(P, pfa_, pfa_wpc_, st_); return; }
@@ -570,6 +597,78 @@ int Engine35::test_xsum(const std::string& name, int M, unsigned seed, int varia
   out4[0] = nd; out4[1] = nu; out4[2] = first; out4[3] = (long long)nsum;
   return nd == 0 && nu == 0 ? 0 : 1;
 }
+#if defined(YSKN_HIP_PREFILL_GEMM)
+// Test hook: the hipBLAS prefill GEMM float-y output vs 16-row lnord XSM launches (the
+// production decode kernel) on random int8 rows and wide-range scales. Both compute
+// acc64 = sum_g round(alpha*2^24/max)*dot_g exactly, so float(acc64)*us must be
+// BIT-EXACT. out4 = {y diffs, max ulp distance, first diff index (-1 none), compared}.
+int Engine35::test_hip_prefill(const std::string& name, int M, unsigned seed, long long* out4) {
+  if (M < 17 || M > PM_ || !xsm_ || xsm_part_) throw std::runtime_error("test_hip_prefill: M must be 17..PM_ (exact-sum mode)");
+  if (!hip_pf_.ok) throw std::runtime_error("test_hip_prefill: workspace not initialized (load with YSKN_HIP_PREFILL=1)");
+  DevTensor* t = name == "head" ? &head_ : tensor_by_name(name);
+  const int N = t->dev.N, Kc = t->dev.Kc, G = Kc / 512;
+  replay_fence(); cudaStreamSynchronize(st_);
+  std::vector<int8_t> hq((size_t)M * Kc); std::vector<float> ha((size_t)M * G);
+  unsigned long long r = 0x9E3779B97F4A7C15ull ^ seed;
+  auto nx = [&]() { r ^= r << 13; r ^= r >> 7; r ^= r << 17; return r; };
+  for (int i = 0; i < M; ++i) {
+    for (int k = 0; k < Kc; ++k) hq[(size_t)i * Kc + k] = (int8_t)((int)(nx() % 255) - 127);
+    for (int g = 0; g < G; ++g) ha[(size_t)i * G + g] = (float)(1e-3 + (double)(nx() % 1000000) / 1e6);
+    if (i % 5 == 1) for (int k = 0; k < 512; ++k) hq[(size_t)i * Kc + (size_t)((i * 7) % G) * 512 + k] = 0;
+    if (i % 7 == 2) ha[(size_t)i * G + (i % G)] = 3.0e4f;
+    if (i % 11 == 3) ha[(size_t)i * G + ((i + 3) % G)] = 0.f;
+    if (i % 13 == 4) ha[(size_t)i * G + ((i + 5) % G)] = 1.0e-30f;
+    if (i == M - 1 && M > 20) for (int g = 0; g < G; ++g) ha[(size_t)i * G + g] = 0.f;
+    if (i % 3 == 0) for (int k = 0; k < 64; ++k) hq[(size_t)i * Kc + k] = (int8_t)((k & 1) ? 127 : -127);
+  }
+  int8_t* dq = nullptr; float* da = nullptr; long long* pa = nullptr; float* yb = nullptr; float *ua = nullptr, *ub = nullptr;
+  const size_t nsum = (size_t)M * N;
+  if (cudaMalloc(&dq, hq.size()) != cudaSuccess || cudaMalloc(&da, ha.size() * 4) != cudaSuccess ||
+      cudaMalloc(&pa, nsum * 8) != cudaSuccess || cudaMalloc(&yb, nsum * 4) != cudaSuccess ||
+      cudaMalloc(&ua, (size_t)M * 4) != cudaSuccess || cudaMalloc(&ub, (size_t)M * 4) != cudaSuccess) {
+    cudaFree(dq); cudaFree(da); cudaFree(pa); cudaFree(yb); cudaFree(ua); cudaFree(ub); cudaGetLastError();
+    throw std::runtime_error("test_hip_prefill: out of memory"); }
+  cudaMemcpy(dq, hq.data(), hq.size(), cudaMemcpyHostToDevice); cudaMemcpy(da, ha.data(), ha.size() * 4, cudaMemcpyHostToDevice);
+  cudaMemsetAsync(pa, 0, nsum * 8, st_); cudaMemsetAsync(ua, 0xff, (size_t)M * 4, st_); cudaMemsetAsync(ub, 0xfe, (size_t)M * 4, st_);
+  cudaDeviceSynchronize();
+  for (int c = 0; c < M; c += 16) {                                       // reference: 16-row lnord XSM launches
+    const int rows = std::min(16, M - c);
+    GemvLaunch P{}; P.M = rows; P.stage_bytes = 0; P.seg[0] = GemvSeg{t->dev, reinterpret_cast<float*>(pa + (size_t)c * N), 0}; P.n_seg = 1;
+    if (rows >= 4 && t->nw_big > 0) P.seg[0].t.n_workers = t->nw_big;
+    P.max_workers = P.seg[0].t.n_workers; P.n_ctas = (N / 64 + GEMV_WARPS - 1) / GEMV_WARPS;
+    P.qx = dq + (size_t)c * Kc; P.alpha = da + (size_t)c * G; P.xsum = 1; P.us_out = ua + c;
+    if (!lnord_eligible(P)) throw std::runtime_error("test_hip_prefill: reference launch not eligible");
+    launch_lnord(P, st_);
+  }
+  GemvLaunch Q{}; Q.M = M; Q.stage_bytes = 0; Q.seg[0] = GemvSeg{t->dev, yb, 0}; Q.n_seg = 1;
+  Q.qx = dq; Q.alpha = da; Q.xsum = 1; Q.us_out = ub; Q.xsm_S = nullptr;
+  Q.xsm_sst = Q35_SST; Q.xsm_nb = H_ / 512; Q.xsm_n = (float)H_; Q.xsm_eps = eps_;
+  const bool launched = launch_hip_prefill(Q, hip_pf_, 0, st_);
+  cudaStreamSynchronize(st_);
+  const cudaError_t e = cudaGetLastError();
+  std::vector<long long> A(nsum); std::vector<float> Y(nsum), UA(M), UB(M);
+  cudaMemcpy(A.data(), pa, nsum * 8, cudaMemcpyDeviceToHost); cudaMemcpy(Y.data(), yb, nsum * 4, cudaMemcpyDeviceToHost);
+  cudaMemcpy(UA.data(), ua, (size_t)M * 4, cudaMemcpyDeviceToHost); cudaMemcpy(UB.data(), ub, (size_t)M * 4, cudaMemcpyDeviceToHost);
+  cudaFree(dq); cudaFree(da); cudaFree(pa); cudaFree(yb); cudaFree(ua); cudaFree(ub);
+  if (!launched) throw std::runtime_error("test_hip_prefill: launch not eligible / hipBLAS refused");
+  if (e != cudaSuccess) throw std::runtime_error(std::string("test_hip_prefill: ") + cudaGetErrorString(e));
+  auto ord = [](float f) { uint32_t u; std::memcpy(&u, &f, 4); return (u & 0x80000000u) ? -(int64_t)(u & 0x7fffffffu) : (int64_t)u; };
+  long long nd = 0, first = -1, maxulp = 0, nu = 0;
+  for (size_t i = 0; i < nsum; ++i) {
+    const float ref = (float)A[i] * UA[i / N];                            // __ll2float_rn + __fmul_rn, same as the epilogue
+    if (std::memcmp(&ref, &Y[i], 4) != 0) {
+      if (first < 0) first = (long long)i;
+      ++nd; const long long d = llabs(ord(ref) - ord(Y[i])); if (d > maxulp) maxulp = d;
+      if (nd <= 4 && std::getenv("YSKN_TEST_HPF_LOG"))
+        std::fprintf(stderr, "[test_hpf] %s M=%d [%zu] ref %a vs %a (acc %lld us %a)\n", name.c_str(), M, i, ref, Y[i], A[i], UA[i / N]);
+    }
+  }
+  for (int i = 0; i < M; ++i) if (std::memcmp(&UA[(size_t)i], &UB[(size_t)i], 4) != 0) ++nu;
+  out4[0] = nd; out4[1] = maxulp; out4[2] = first; out4[3] = (long long)nsum;
+  if (nu) std::fprintf(stderr, "[test_hpf] %s: %lld row-scale mismatches\n", name.c_str(), nu);
+  return nd == 0 && nu == 0 ? 0 : 1;
+}
+#endif
 void Engine35::chk_after(std::initializer_list<DevTensor*> ts, int M, const int8_t* qx, const float* alpha) {
   if (!chk_on_ || chk_.empty()) return;
   for (DevTensor* t : ts) {
