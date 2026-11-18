@@ -47,10 +47,23 @@ Other GPUs are **untested**. The library carries machine code for `gfx1100` only
   ROCm 7.1 installer: <https://rocm.docs.amd.com/projects/install-on-linux/en/latest/>.
 * Python 3.10+ with `numpy>=1.23`, `tokenizers>=0.15`, `jinja2>=3.1` (and `Pillow>=10` for image input).
   Install once, into the system Python or a virtual environment of your choice:
-  `python3 -m pip install ./python` (or `uv pip install ./python`). `start_amd.sh` reuses an existing
+  `python3 -m pip install ./python`. `start_amd.sh` reuses an existing
   `.venv`/`venv` next to it, or `YASAKANI_PYTHON`; when the modules are missing it stops and shows
   the install command (it does not install anything by itself). With the dependencies present, the
   bundled package also works without installation (`start_amd.sh` sets `PYTHONPATH` itself).
+
+  **With [uv](https://docs.astral.sh/uv/)** (recommended; keeps the system Python untouched):
+
+  ```sh
+  uv venv .venv                          # private environment next to start_amd.sh
+  uv pip install --python .venv/bin/python ./python   # package + numpy/tokenizers/jinja2 (+Pillow)
+  ./start_amd.sh                         # auto-detects .venv
+  ```
+
+  `uv pip install --python .venv/bin/python ./python` reads `python/pyproject.toml` and installs the
+  yasakani package plus its dependencies into `.venv`. Add `Pillow` for image input
+  (`uv pip install --python .venv/bin/python Pillow`). To use a different interpreter, point
+  `YASAKANI_PYTHON` at it (e.g. `YASAKANI_PYTHON=.venv/bin/python ./start_amd.sh`).
 * A model folder (not bundled, ~10–12 GB; see below).
 
 `start_amd.sh` checks the ROCm runtime (`libamdhip64`), `/dev/kfd` access, the engine library and the

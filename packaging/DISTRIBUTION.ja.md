@@ -47,10 +47,23 @@ HIPバックエンドは**追加**であり置換ではありません：CUDA/NV
   ROCm 7.1インストーラを使用：<https://rocm.docs.amd.com/projects/install-on-linux/en/latest/>。
 * Python 3.10+ と `numpy>=1.23`・`tokenizers>=0.15`・`jinja2>=3.1`（画像入力には `Pillow>=10`）。
   一度だけ、システムPythonか任意の仮想環境へ：
-  `python3 -m pip install ./python`（または `uv pip install ./python`）。`start_amd.sh` は隣の
+  `python3 -m pip install ./python`。`start_amd.sh` は隣の
   `.venv`/`venv` か `YASAKANI_PYTHON` を再利用。モジュール不足時は停止してインストールコマンドを
   表示（自身ではインストールしない）。依存があれば同梱パッケージはインストール無しでも動作
   （`start_amd.sh` が `PYTHONPATH` を設定）。
+
+  **[uv](https://docs.astral.sh/uv/) を使う場合**（推奨・システムPythonを汚さない）：
+
+  ```sh
+  uv venv .venv                          # start_amd.sh 隣の私有環境
+  uv pip install --python .venv/bin/python ./python   # パッケージ + numpy/tokenizers/jinja2 (+Pillow)
+  ./start_amd.sh                         # .venv を自動検出
+  ```
+
+  `uv pip install --python .venv/bin/python ./python` は `python/pyproject.toml` を読み、
+  yasakaniパッケージと依存を `.venv` へインストール。画像入力には `Pillow` を追加
+  （`uv pip install --python .venv/bin/python Pillow`）。別のインタプリタを使う場合は
+  `YASAKANI_PYTHON` で指定（例 `YASAKANI_PYTHON=.venv/bin/python ./start_amd.sh`）。
 * モデルフォルダ（非バンドル・約10–12 GB・下記）。
 
 `start_amd.sh` は起動前にROCmランタイム（`libamdhip64`）・`/dev/kfd` アクセス・エンジンライブラリ・
