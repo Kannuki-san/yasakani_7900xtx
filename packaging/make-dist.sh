@@ -33,6 +33,7 @@ else
   cp "$ROOT/llama-b10488-src/LICENSE" "$STAGE/llama-b10488/LICENSE"   # llama.cpp b10488, MIT
 fi
 cp "$ROOT/packaging/DISTRIBUTION.md" "$STAGE/README.md"
+cp "$ROOT/packaging/DISTRIBUTION.ja.md" "$STAGE/README.ja.md"
 cp "$ROOT/LICENSE" "$ROOT/NOTICE" "$ROOT/THIRD_PARTY_NOTICES.md" "$STAGE/"
 
 find "$STAGE" -name '__pycache__' -type d -prune -exec rm -rf {} +
