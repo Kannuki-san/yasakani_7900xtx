@@ -69,6 +69,16 @@ if(YSKN_BACKEND STREQUAL "HIP")
   set_source_files_properties(${YSKN_SOURCES} PROPERTIES LANGUAGE HIP)
   target_include_directories(yskn PRIVATE backends/hip/shim src include third_party)
   target_compile_definitions(yskn PRIVATE YSKN_BUILD YSKN_KVX_MODE=${YSKN_KVX_MODE} NOMINMAX)
+  # Q2 cache-policy hints: env YSKN_HIP_CACHE_HINTS at configure time (or -DYSKN_HIP_CACHE_HINTS=):
+  # 0 = plain loads/stores (Phase-0 behavior), 1 = gfx1100 nontemporal/glc bits (default).
+  # Requires reconfigure+rebuild.
+  if(DEFINED ENV{YSKN_HIP_CACHE_HINTS})
+    set(_yskn_ch_default "$ENV{YSKN_HIP_CACHE_HINTS}")
+  else()
+    set(_yskn_ch_default 1)
+  endif()
+  set(YSKN_HIP_CACHE_HINTS "${_yskn_ch_default}" CACHE STRING "HIP cache hints: 0=plain, 1=gfx1100 nontemporal/glc")
+  target_compile_definitions(yskn PRIVATE YSKN_HIP_CACHE_HINTS=${YSKN_HIP_CACHE_HINTS})
   # -ffp-contract=off is the HIP equivalent of nvcc --fmad=false (keeps the arithmetic identical to the reference).
   # -include: nvcc implicitly includes cuda_runtime.h in every TU; HIP does not, so force the shim (which includes hip_runtime.h).
   target_compile_options(yskn PRIVATE -O3 -ffp-contract=off -include cuda_runtime.h)

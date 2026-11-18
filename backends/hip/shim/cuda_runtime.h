@@ -115,12 +115,61 @@ template <typename T> inline hipError_t cudaFuncGetAttributes(hipFuncAttributes*
   return hipFuncGetAttributes(attr, (const void*)func);
 }
 
-// Cache-hint load/store intrinsics: HIP only overloads __half/__half2, so add generic templates.
-// The cache hints are dropped for now (plain loads/stores); nontemporal hints return in Phase 7.
+// ---- Cache-policy loads/stores (gfx1100/RDNA3; Q2) ----
+// CUDA hint -> RDNA3 cache bits (LLVM 21 SIMemoryLegalizer semantics, ISA probe-verified):
+//   __ldg/__ldcs (read-only / streaming) -> nontemporal load = slc+dlc:
+//     L0/L1 HIT_EVICT, L2 STREAM (evict-first, still allocates), MALL NOALLOC.
+//     Weights are streamed read-once and never fit the 96MB MALL; NOALLOC keeps KV/activations
+//     cached there. Small hot read-only data (LUT/qx/alpha) still hits L2 (STREAM allocates).
+//     RDNA3 has no non-coherent texture path, so this is the RDNA3 tuning of the read-only hint.
+//   __ldcg (cache-global = L2-only) -> relaxed atomic load = glc: L0/L1 MISS_EVICT, read at L2.
+//     acc partials are produced by atomicAdd at L2; glc reads see them without L0/L1 staleness.
+//     16B types (uint4 KV rows): no compile-safe glc load builtin exists -> plain load (still
+//     L2-cached). Inline asm was rejected: the compiler would not insert s_waitcnt for it.
+//   __stcg -> plain store: RDNA3 vector stores write through to L2 with no L0/L1 allocation
+//     (LLVM lowers monotonic atomic stores to plain stores), i.e. already cg-equivalent.
+// Hints are performance-only on AMD (coherence is maintained), so values are bit-identical.
+// HIP 7.1 hip_ldg.h declares native non-template __ldg overloads (plain loads) that beat generic
+// templates in overload resolution, so the new mappings are applied via function-like macros.
+// Kill switch: YSKN_HIP_CACHE_HINTS=0 restores the old plain loads/stores (cmake env/-D, rebuild).
+#ifndef YSKN_HIP_CACHE_HINTS
+#define YSKN_HIP_CACHE_HINTS 1
+#endif
+#if YSKN_HIP_CACHE_HINTS
+template <typename T> __device__ __forceinline__ T yskn_ld_nt(const T* p) {
+  if constexpr (sizeof(T) == 1)
+    return __builtin_bit_cast(T, __builtin_nontemporal_load(reinterpret_cast<const unsigned char*>(p)));
+  else if constexpr (sizeof(T) == 2)
+    return __builtin_bit_cast(T, __builtin_nontemporal_load(reinterpret_cast<const unsigned short*>(p)));
+  else {
+    static_assert(sizeof(T) == 4 || sizeof(T) == 8 || sizeof(T) == 16, "yskn_ld_nt: unsupported size");
+    using V = unsigned __attribute__((ext_vector_type(sizeof(T) / 4)));
+    return __builtin_bit_cast(T, __builtin_nontemporal_load(reinterpret_cast<const V*>(p)));
+  }
+}
+template <typename T> __device__ __forceinline__ T yskn_ld_glc(const T* p) {
+  if constexpr (sizeof(T) == 1)
+    return __builtin_bit_cast(T, __atomic_load_n(reinterpret_cast<const unsigned char*>(p), __ATOMIC_RELAXED));
+  else if constexpr (sizeof(T) == 2)
+    return __builtin_bit_cast(T, __atomic_load_n(reinterpret_cast<const unsigned short*>(p), __ATOMIC_RELAXED));
+  else if constexpr (sizeof(T) == 4)
+    return __builtin_bit_cast(T, __atomic_load_n(reinterpret_cast<const unsigned*>(p), __ATOMIC_RELAXED));
+  else if constexpr (sizeof(T) == 8)
+    return __builtin_bit_cast(T, __atomic_load_n(reinterpret_cast<const unsigned long long*>(p), __ATOMIC_RELAXED));
+  else
+    return *p;   // 16B: plain fallback (see comment above)
+}
+#define __ldg(p)  yskn_ld_nt(p)
+#define __ldcs(p) yskn_ld_nt(p)
+#define __ldcg(p) yskn_ld_glc(p)
+template <typename T> __device__ inline void __stcg(T* p, T v) { *p = v; }
+#else
+// Old Phase-0 behavior: cache hints dropped (plain loads/stores).
 template <typename T> __device__ inline T __ldg(const T* p) { return *p; }
 template <typename T> __device__ inline T __ldcg(const T* p) { return *p; }
 template <typename T> __device__ inline T __ldcs(const T* p) { return *p; }
 template <typename T> __device__ inline void __stcg(T* p, T v) { *p = v; }
+#endif
 
 // Warp-sync masks: HIP requires mask == activemask at the call site (__hip_check_mask traps
 // otherwise), while CUDA code passes 0xffffffff even under divergence. Use the actual active
