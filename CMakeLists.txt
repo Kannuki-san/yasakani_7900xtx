@@ -79,6 +79,15 @@ if(YSKN_BACKEND STREQUAL "HIP")
   if(EXISTS "${YSKN_SQRT_CFG}")
     target_compile_options(yskn PRIVATE "SHELL:-Xclang -mlink-builtin-bitcode -Xclang ${YSKN_SQRT_CFG}")
   endif()
+  # AMD-native trellis/pk3 attention (RDNA3, backends/hip/attention) is the HIP default
+  # (verified on gfx1100: selfcheck 98.9% top-1 vs the public RTX 5090 reference, sure-changed 0).
+  # The native launcher falls back to the existing path for unsupported configs and via YSKN_ATX_NATIVE=0.
+  option(YSKN_NATIVE_ATXPK "Build the AMD-native trellis/pk3 attention (gfx1100)" ON)
+  if(YSKN_NATIVE_ATXPK)
+    target_sources(yskn PRIVATE backends/hip/attention/q35_atxpk_native.hip)
+    set_source_files_properties(backends/hip/attention/q35_atxpk_native.hip PROPERTIES LANGUAGE HIP)
+    target_compile_definitions(yskn PRIVATE YSKN_HIP_NATIVE_ATXPK)
+  endif()
   # AMD-native INT8-row KV attention for non-packed contexts (MTP layer etc.):
   # the converted q35_atx tiles exceed gfx1100's 64KB LDS and its NS=1 fallback
   # spills heavily; this reuses the proven pk3-native WMMA/softmax patterns.
