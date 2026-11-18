@@ -159,7 +159,7 @@ change was needed:
 - Correctness: all 13 tensors × M=17..512 ALL EXACT (bit-exact vs the lnord
   XSM reference).
 - Selfcheck: top-1 98.9% vs the public RTX 5090 reference, sure-changed 0.
-- Prefill: 8K 546.5 tok/s (≈18× the converted path), 78K 199 tok/s (≈7.6×).
+- Prefill: 8K ≈ 546 tok/s, 78K ≈ 199 tok/s (RX 7900 XTX, trellis KV5).
 - Decode: no regression; speculative-decode accept rates maintained.
 - Kill switch `YSKN_HIP_PREFILL=0`: clean fallback, no throw.
 - CPU self-checks (no GPU needed): `prefill/test_hpf_math.cpp`,

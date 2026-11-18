@@ -1,22 +1,22 @@
 # YASAKANI_7900xtx
 
 > [!NOTE]
-> **AMD Radeon RX 7900 XTX (gfx1100) native HIP backend — functional and verified**
+> **AMD Radeon RX 7900 XTX (gfx1100) native HIP backend — Linux only**
 >
-> This fork adds an independent AMD ROCm/HIP native backend to YASAKANI, targeting the AMD Radeon RX 7900 XTX (gfx1100, RDNA3, wave32) on Linux. The upstream NVIDIA CUDA backend is preserved unchanged; AMD support is added without replacing it.
+> This fork adds an independent AMD ROCm/HIP native backend to YASAKANI for the AMD Radeon RX 7900 XTX (gfx1100, RDNA3, wave32). **It runs on Linux only** (ROCm 7.1 / hipcc, built from source). The upstream NVIDIA CUDA backend (Windows) is preserved unchanged; AMD support is added without replacing it.
 >
-> Verified on the RX 7900 XTX against the RTX 5090 reference: `yasakani selfcheck` top-1 agreement 98.9% (trellis KV5) / 99.3% (bf16 KV), prefill about 18× the initial HIP port (8K ≈ 543 tok/s, 78K ≈ 199 tok/s), speculative decoding, image input (CPU encoder), and up to 256K context within 24 GB. Build from source with ROCm 7.1 / hipcc — see [BUILDING.md](BUILDING.md) and [backends/hip/README.md](backends/hip/README.md).
+> It runs the same Qwen3.8-27B model files: trellis KV5 and bf16 key-value cache, speculative decoding, image input (CPU encoder), and up to 256K context within 24 GB. `yasakani selfcheck` reproduces the RTX 5090 reference (top-1 98.9% trellis / 99.3% bf16); prefill ≈ 543 tok/s (8K) / 199 tok/s (78K). See [BUILDING.md](BUILDING.md) and [backends/hip/README.md](backends/hip/README.md).
 >
-> Limits: tested on gfx1100 only (other AMD GPUs are untested); the CUDA backend is unchanged from upstream but has not been re-verified on NVIDIA hardware in this fork; the GPU vision projector (`YASAKANI_VISION_GPU=1`) is unverified on AMD (the CPU encoder works).
+> Limits: gfx1100 only (other AMD GPUs untested); the CUDA backend is unchanged from upstream but not re-tested on NVIDIA hardware in this fork; the GPU vision projector (`YASAKANI_VISION_GPU=1`) is untested on AMD (the CPU encoder works).
 
 
-> **AMD Radeon RX 7900 XTX (gfx1100) ネイティブHIPバックエンド — 動作確認済み**
+> **AMD Radeon RX 7900 XTX (gfx1100) ネイティブHIPバックエンド — Linux専用**
 >
-> このフォークはYASAKANIに独立したAMD ROCm/HIPネイティブバックエンドを追加します（対象: AMD Radeon RX 7900 XTX / gfx1100 / RDNA3 / wave32・Linux）。上流のNVIDIA CUDAバックエンドは変更せず維持し、AMD対応はそれを置き換えずに追加しています。
+> このフォークはYASAKANIに独立したAMD ROCm/HIPネイティブバックエンドを追加します（対象: AMD Radeon RX 7900 XTX / gfx1100 / RDNA3 / wave32）。**Linux専用**（ROCm 7.1 / hipcc・ソースからビルド）。上流のNVIDIA CUDAバックエンド（Windows）は変更せず維持し、AMD対応はそれを置き換えずに追加しています。
 >
-> RX 7900 XTXでRTX 5090参照に対し検証済み: `yasakani selfcheck` top-1一致 98.9%（trellis KV5）/ 99.3%（bf16 KV）、prefillは初期HIP移植比 約18倍（8K ≈ 543 tok/s・78K ≈ 199 tok/s）、投機デコード、画像入力（CPUエンコーダ）、24GB内で最大256Kコンテキスト。ROCm 7.1 / hipccでソースからビルド — [BUILDING.md](BUILDING.md)・[backends/hip/README.md](backends/hip/README.md) 参照。
+> 同じQwen3.8-27Bモデルファイルで動作: trellis KV5 / bf16 KVキャッシュ、投機デコード、画像入力（CPUエンコーダ）、24GB内で最大256Kコンテキスト。`yasakani selfcheck`はRTX 5090参照を再現（top-1 98.9% trellis / 99.3% bf16）、prefill ≈ 543 tok/s（8K）/ 199 tok/s（78K）。[BUILDING.md](BUILDING.md)・[backends/hip/README.md](backends/hip/README.md) 参照。
 >
-> 制限: gfx1100のみ検証（他AMD GPUは未検証）。CUDAバックエンドは上流のまま変更なしですが、本フォークではNVIDIA実機で再検証していません。GPU visionプロジェクタ（`YASAKANI_VISION_GPU=1`）はAMD未検証（CPUエンコーダは動作）。
+> 制限: gfx1100のみ（他AMD GPUは未テスト）。CUDAバックエンドは上流のまま変更なしですが本フォークではNVIDIA実機で再テストしていません。GPU visionプロジェクタ（`YASAKANI_VISION_GPU=1`）はAMD未テスト（CPUエンコーダは動作）。
 
 
 A local LLM engine for **Windows** and **one NVIDIA RTX GPU** (tested on the **RTX 5090**), built for one model: **Qwen3.8-27B**. Open source, Apache License 2.0.
@@ -28,12 +28,12 @@ A local LLM engine for **Windows** and **one NVIDIA RTX GPU** (tested on the **R
 
 ## AMD HIP backend (this fork)
 
-This fork (`YASAKANI_7900xtx`) adds a native AMD ROCm/HIP backend **alongside** the upstream NVIDIA CUDA backend. The CUDA backend is unchanged; the HIP backend is selected at build time (`-DYSKN_BACKEND=HIP`) and runs the same model files, quantization and inference algorithm. It is built and tuned for the **Radeon RX 7900 XTX (gfx1100, RDNA3, wave32)** on Linux.
+This fork (`YASAKANI_7900xtx`) adds a native AMD ROCm/HIP backend **alongside** the upstream NVIDIA CUDA backend. The CUDA backend is unchanged; the HIP backend is selected at build time (`-DYSKN_BACKEND=HIP`) and runs the same model files, quantization and inference algorithm. It is built and tuned for the **Radeon RX 7900 XTX (gfx1100, RDNA3, wave32)**, **on Linux only** (there is no Windows HIP build).
 
 **Implemented:**
 - Native WMMA GEMV/GEMM (trellis weight decode + int8 matrix multiply), LDS-staged for the 64 KB shared-memory limit.
 - Native trellis/pk3 compressed-KV attention and INT8-row KV attention (online softmax, native WMMA layout).
-- hipBLAS int8 per-group prefill GEMM (reusing the trellis weight predecode and cache), about 18× the initial HIP port.
+- hipBLAS int8 per-group prefill GEMM (reusing the trellis weight predecode and cache).
 - AMD GPU detection in Python (sysfs / rocm-smi), CLI / serve / chat, and image input through the llama.cpp b10488 CPU encoder.
 
 **Build and run (Linux, ROCm 7.1 / hipcc):**
@@ -46,9 +46,9 @@ yasakani info  --model-dir <model> --dll build/bin/libyskn.so
 yasakani serve --model-dir <model> --dll build/bin/libyskn.so
 ```
 
-Details, kill switches and the verification status: [backends/hip/README.md](backends/hip/README.md) and [BUILDING.md](BUILDING.md).
+Details, kill switches and the current status: [backends/hip/README.md](backends/hip/README.md) and [BUILDING.md](BUILDING.md).
 
-**Verified on the RX 7900 XTX** against the RTX 5090 reference: `selfcheck` top-1 98.9% (trellis KV5) / 99.3% (bf16 KV), prefill 8K ≈ 543 tok/s and 78K ≈ 199 tok/s, decode speed and speculative accept rate unchanged, image recognition, and up to 256K context within 24 GB. **Not yet tested:** other AMD GPUs, the CUDA backend on NVIDIA hardware in this fork, and the GPU vision projector (`YASAKANI_VISION_GPU=1`) on AMD.
+On the RX 7900 XTX, against the RTX 5090 reference: `selfcheck` top-1 98.9% (trellis KV5) / 99.3% (bf16 KV), prefill 8K ≈ 543 tok/s and 78K ≈ 199 tok/s, decode speed and speculative accept rate unchanged, image recognition, and up to 256K context within 24 GB. **Not yet tested:** other AMD GPUs, the CUDA backend on NVIDIA hardware in this fork, and the GPU vision projector (`YASAKANI_VISION_GPU=1`) on AMD.
 
 ## What it is
 
