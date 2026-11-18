@@ -3,3 +3,6 @@
 __pycache__/
 *.pyc
 *.egg-info/
+
+# Linux distribution output (local only)
+/dist/
