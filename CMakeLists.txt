@@ -79,6 +79,15 @@ if(YSKN_BACKEND STREQUAL "HIP")
   if(EXISTS "${YSKN_SQRT_CFG}")
     target_compile_options(yskn PRIVATE "SHELL:-Xclang -mlink-builtin-bitcode -Xclang ${YSKN_SQRT_CFG}")
   endif()
+  # AMD-native INT8-row KV attention for non-packed contexts (MTP layer etc.):
+  # the converted q35_atx tiles exceed gfx1100's 64KB LDS and its NS=1 fallback
+  # spills heavily; this reuses the proven pk3-native WMMA/softmax patterns.
+  option(YSKN_NATIVE_ATXROW "Build the AMD-native INT8-row KV attention (gfx1100)" ON)
+  if(YSKN_NATIVE_ATXROW)
+    target_sources(yskn PRIVATE backends/hip/attention/q35_atxrow_native.hip)
+    set_source_files_properties(backends/hip/attention/q35_atxrow_native.hip PROPERTIES LANGUAGE HIP)
+    target_compile_definitions(yskn PRIVATE YSKN_HIP_NATIVE_ATXROW)
+  endif()
   # AMD-native prefill GEMM (hipBLAS int8 per-group + fused dequant, backends/hip/prefill).
   # Compiled in and enabled by default on HIP (GPU-verified: all-tensor bit-exact vs lnord,
   # selfcheck 98.9%); kill switch YSKN_HIP_PREFILL=0 restores the PFA/lnord path.

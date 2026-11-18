@@ -6,6 +6,7 @@
 #include <cuda_fp16.h>
 #include <stdexcept>
 #include "q35.hpp"
+#include "../backends/hip/attention/q35_atxrow_native.hpp"
 #include <cmath>
 #include <cstdlib>
 namespace yskn {
@@ -793,6 +794,9 @@ void launch_q35_atx(const Q35AttnArgs& A, const uint8_t* wk, cudaStream_t st) {
   // KVX_MODE=3 (the supported HIP config) always has INT8 KV; bf16/fp16 KV tiles do
   // not fit 64KB and are rejected explicitly instead of failing at launch.
   if (A.k8 && !A.kv_fp16) {
+#if defined(YSKN_HIP_NATIVE_ATXROW)
+    if (launch_q35_atxrow_native(A, wk, st)) return;   // native RDNA3 row-KV attention (no spills, ~28KB LDS)
+#endif
     constexpr size_t ATX_SMEM1 = (size_t)2 * ATX_KT * ATX_LD * 2 + (size_t)2 * ATX_KT * Q35_HD + (size_t)2 * ATX_KT * 4;
     static bool attr1 = false;
     if (!attr1) { cudaFuncSetAttribute(q35_atx_kernel<true, 6, 1>, cudaFuncAttributeMaxDynamicSharedMemorySize, (int)ATX_SMEM1);
