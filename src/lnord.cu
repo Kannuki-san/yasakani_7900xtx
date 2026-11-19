@@ -459,7 +459,13 @@ template <int K, int MT, int UWX = 0, int MBX = 0, bool LO = false> static void 
 
 
 
-static int lno_cfg_env() { static const int v = [] { const char* e = std::getenv("YSKN_LNO_CFG"); return e && e[0] ? std::atoi(e) : -1; }(); return v; }
+static int lno_cfg_env() { static const int v = [] { const char* e = std::getenv("YSKN_LNO_CFG"); if (e && e[0]) return std::atoi(e);
+#if defined(__HIP_PLATFORM_AMD__)
+  return 2;   // HIP default cfg2 (UW4): halves per-CTA LUT reload traffic; measured +5% decode, bit-exact. Opt-out: YSKN_LNO_CFG=-1.
+#else
+  return -1;
+#endif
+ }(); return v; }
 static int lno_cfg_of(int M) { static const int tab[9] = {0, 1, 2, 1, 2, 2, 2, 2, 2}; const int f = lno_cfg_env(); return f >= 0 ? f : (M <= 8 ? tab[M] : 0); }
 template <int K> static void launch_lno_m(const GemvLaunch& P, cudaStream_t st) {
   const int cfg = P.lno_cfg >= 0 ? P.lno_cfg : lno_cfg_of(P.M);

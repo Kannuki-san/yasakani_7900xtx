@@ -526,6 +526,11 @@ __global__ void __launch_bounds__(128) q35_state_pf_kernel(Q35StateArgs A) {
 
 constexpr int Q35_NB_TS = 24, Q35_NB_KQ = 4 * 36;
 constexpr size_t Q35_NB_SMEM = sizeof(float) * (2 * Q35_NB_TS * Q35_NB_KQ * 2 + 2 * Q35_NB_TS * 128 + 4 * Q35_NB_TS);
+// Safety/compat capability gate: state_nb requires Q35_NB_SMEM dynamic LDS. On devices whose
+// opt-in ceiling is smaller (gfx1100 64KB < 80,256B) the launch would fail and leave GDN
+// core/S/hist uncommitted (silent wrong output). Report fit so layer_prepare can disable
+// overlap and use the proven base state kernel instead. CUDA (>=99KB) always fits -> unchanged.
+bool q35_state_nb_fits() { static const bool ok = [] { int dev = 0, v = 0; cudaGetDevice(&dev); cudaDeviceGetAttribute(&v, cudaDevAttrMaxSharedMemoryPerBlockOptin, dev); const int lim = v > 0 ? v : 65536; return (size_t)lim >= Q35_NB_SMEM; }(); return ok; }
 __global__ void __launch_bounds__(512, 1) q35_state_nb_kernel(Q35StateArgs A) {
   constexpr int TS = Q35_NB_TS, KQ = Q35_NB_KQ;
   extern __shared__ __align__(16) float sm_nb[];

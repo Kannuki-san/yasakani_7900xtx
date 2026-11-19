@@ -68,7 +68,13 @@ static int hpf_dbg_env() { static const int v = [] { const char* e = std::getenv
 static int hpf_batched_env() { static const int v = [] { const char* e = std::getenv("YSKN_HIP_PREFILL_BATCHED"); return e ? std::atoi(e) != 0 : 1; }(); return v; }
 // rocBLAS int8 solutions were GPU-verified up to M=256; larger M is split into row
 // blocks of this size (the n=512 solution selection is unverified territory).
-static int hpf_mcap_env() { static const int v = [] { const char* e = std::getenv("YSKN_HIP_PREFILL_MCAP"); int m = e ? std::atoi(e) : 256; return m >= 16 ? m : 256; }(); return v; }
+static int hpf_mcap_env() { static const int v = [] { const char* e = std::getenv("YSKN_HIP_PREFILL_MCAP");
+#if defined(__HIP_PLATFORM_AMD__)
+  int def = 512;   // HIP default: single row-block at M=512 halves weight re-reads; +2.4% prefill, hpf_verify bit-exact. Opt-out: =256.
+#else
+  int def = 256;
+#endif
+  int m = e ? std::atoi(e) : def; return m >= 16 ? m : def; }(); return v; }
 
 void HipPrefillWorkspace::init(size_t arena_b, size_t tensor_b, size_t partial_b, int mmax, cudaStream_t st) {
   if (ok) return;

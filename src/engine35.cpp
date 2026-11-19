@@ -199,6 +199,9 @@ Engine35::Engine35(const std::string& path, int max_ctx, int flags) : flags_(fla
   { const char* e = std::getenv("YSKN_Q35_LO"); if (e && e[0]) opt_lo_ = std::atoi(e); }
   { const char* e = std::getenv("YSKN_PFA"); if (e && e[0]) pfa_ = std::atoi(e); const char* w = std::getenv("YSKN_PFA_WPC"); if (w && w[0]) pfa_wpc_ = std::atoi(w); }
   Pmax_ = pfa_ ? 512 : Mmax_;
+#if defined(__HIP_PLATFORM_AMD__)
+  if (pfa_) Pmax_ = 1024;   // HIP default: larger chunks dilute per-chunk weight prep; +2.3% prefill, bit-exact. Opt-out: YSKN_Q35_PMAX=512.
+#endif
   { const char* e = std::getenv("YSKN_Q35_PMAX"); if (e && pfa_) { const int n=std::atoi(e);
       if (n >= 512 && n <= 2048 && n % 64 == 0) Pmax_=n; } }
   PM_ = Pmax_;
@@ -1311,7 +1314,7 @@ bool Engine35::layer_prepare() {
   size_t free=0,total=0; if(cudaMemGetInfo(&free,&total)!=cudaSuccess) throw std::runtime_error("layer memory query failed");
   const size_t margin=(size_t)1<<30;
   int sc=std::max(PM_*2,layer_rows_);sc=((sc+PM_-1)/PM_)*PM_;
-  bool overlap=ovl_!=0;size_t need=0;
+  bool overlap=ovl_!=0 && q35_state_nb_fits();size_t need=0;   // b1: disable vsp overlap when state_nb LDS exceeds device ceiling (gfx1100); base state kernel commits instead
   while (true) {
     need=extra+capbytes+rowbytes*sc+(overlap?nbbytes:0);
     if(free>margin && need<=free-margin) break;

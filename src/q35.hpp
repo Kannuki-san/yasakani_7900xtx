@@ -68,6 +68,7 @@ void launch_q35_conv(const Q35ConvArgs&, cudaStream_t);
 struct Q35StateArgs { const float *q, *k, *v, *beta, *g; float* S; int M; int n_commit; float* core; const uint16_t* mixed; uint16_t* hist; };
 void launch_q35_capture_a8(const float*,int,int,int,const int8_t*,int8_t*,float*,int,cudaStream_t);
 void launch_q35_state_nb(const Q35StateArgs&, cudaStream_t);
+bool q35_state_nb_fits();   // capability gate: state_nb dynamic LDS fits device opt-in ceiling
 void launch_q35_state(const Q35StateArgs&, cudaStream_t);
 
 struct Q35GdnOutArgs { const float* core; const float* z; const uint16_t* gw; float eps; int M; const int8_t* sg_in; int8_t* qx; float* alpha; int lo = 0; };
