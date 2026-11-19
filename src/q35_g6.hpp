@@ -11,6 +11,7 @@ struct Q35G6Workspace {
   size_t partial_bytes = 0, flags_bytes = 0; int resident[4] = {};
 };
 void q35_g6_decode(const TensorDev& t, uint4* dst, cudaStream_t st);
+void q35_g6_decode_rm(const TensorDev& t, uint4* dst, cudaStream_t st);   // C3: decode straight to row-major
 void q35_g6_prepare(Q35G6Workspace& W, int sms);
 bool launch_q35_g6(const GemvLaunch& P, Q35G6Workspace& W, int pm, cudaStream_t st);
 }

@@ -29,7 +29,7 @@ __device__ __forceinline__ void mt_mma(int* d, const unsigned* a, uint2 b) { ysk
 __device__ __forceinline__ void mt_cp_commit() { yskn::arch::cp_commit(); }
 __device__ __forceinline__ void mt_cp16s(uintptr_t saddr, const void* gmem_src) { yskn::arch::cp16((void*)saddr, gmem_src); }
 __device__ __forceinline__ void mt_mad_wide(long long& acc, int a, int b) { acc += (long long)a * b; }
-template <int K> __global__ void __launch_bounds__(256) mt_predecode2_kernel(TensorDev t, uint4* w8) {
+template <int K, bool RM = false> __global__ void __launch_bounds__(256) mt_predecode2_kernel(TensorDev t, uint4* w8) {
   constexpr int NU = K / 2, T = 12 - K, TS = 3 * K - 12, SS = 8;
   constexpr unsigned PM = (1u << (2 * K)) - 1u, TM = (1u << T) - 1u;
   __shared__ __align__(16) uint16_t s_lut[4096];
@@ -59,10 +59,26 @@ template <int K> __global__ void __launch_bounds__(256) mt_predecode2_kernel(Ten
     q0 = p20 >> TS; q1 = p21 >> TS;
   }
   __syncwarp();
-  uint4* const dst = w8 + ((size_t)tile * nblk + bi) * (SS * 32) + lane;
-  #pragma unroll
-  for (int m = 0; m < SS; ++m)
-    dst[32 * m] = make_uint4(s_t[warp][gid][8 * m + tig], s_t[warp][gid][8 * m + 4 + tig], s_t[warp][gid + 8][8 * m + tig], s_t[warp][gid + 8][8 * m + 4 + tig]);
+  if (RM) {
+    // C3: write row-major directly (skip the G6 scratch + hpf_repack round-trip).
+    // uint32 = 4 consecutive K of one row; row0=tile*16+gid (hi0), row1=+8 (hi1); k4=8*m+tig / +4.
+    unsigned* rm = reinterpret_cast<unsigned*>(w8);
+    const size_t rstride = (size_t)(t.Kc >> 2);
+    const size_t r0 = (size_t)(tile * 16 + gid) * rstride, r1 = (size_t)(tile * 16 + 8 + gid) * rstride;
+    const size_t kbase = (size_t)bi * 64;   // 256-K block bi -> k4 offset bi*64
+    #pragma unroll
+    for (int m = 0; m < SS; ++m) {
+      rm[r0 + kbase + 8 * m + tig]     = s_t[warp][gid][8 * m + tig];
+      rm[r0 + kbase + 8 * m + 4 + tig] = s_t[warp][gid][8 * m + 4 + tig];
+      rm[r1 + kbase + 8 * m + tig]     = s_t[warp][gid + 8][8 * m + tig];
+      rm[r1 + kbase + 8 * m + 4 + tig] = s_t[warp][gid + 8][8 * m + 4 + tig];
+    }
+  } else {
+    uint4* const dst = w8 + ((size_t)tile * nblk + bi) * (SS * 32) + lane;
+    #pragma unroll
+    for (int m = 0; m < SS; ++m)
+      dst[32 * m] = make_uint4(s_t[warp][gid][8 * m + tig], s_t[warp][gid][8 * m + 4 + tig], s_t[warp][gid + 8][8 * m + tig], s_t[warp][gid + 8][8 * m + 4 + tig]);
+  }
 }
 constexpr int G6_BN = 128, G6_BK = 64, G6_S = 4, G6_GP = 12, G6_NT = 256;
 template <int MB> struct G6C {
@@ -314,6 +330,13 @@ void q35_g6_decode(const TensorDev& t, uint4* dst, cudaStream_t st) {
   if (t.k_default == 6) { mt_predecode2_kernel<6><<<blocks, 256, 0, st>>>(t, dst); kdbg_check((const void*)mt_predecode2_kernel<6>, dim3(blocks), dim3(256), 0); }
   else if (t.k_default == 8) { mt_predecode2_kernel<8><<<blocks, 256, 0, st>>>(t, dst); kdbg_check((const void*)mt_predecode2_kernel<8>, dim3(blocks), dim3(256), 0); }
   else { mt_predecode2_kernel<4><<<blocks, 256, 0, st>>>(t, dst); kdbg_check((const void*)mt_predecode2_kernel<4>, dim3(blocks), dim3(256), 0); }
+}
+// C3: decode straight to row-major (dst = int8 row-major buffer), no G6 scratch / repack.
+void q35_g6_decode_rm(const TensorDev& t, uint4* dst, cudaStream_t st) {
+  const int blocks = ((t.N / 16) * (t.Kc / 256) + 7) / 8;
+  if (t.k_default == 6) { mt_predecode2_kernel<6, true><<<blocks, 256, 0, st>>>(t, dst); kdbg_check((const void*)mt_predecode2_kernel<6, true>, dim3(blocks), dim3(256), 0); }
+  else if (t.k_default == 8) { mt_predecode2_kernel<8, true><<<blocks, 256, 0, st>>>(t, dst); kdbg_check((const void*)mt_predecode2_kernel<8, true>, dim3(blocks), dim3(256), 0); }
+  else { mt_predecode2_kernel<4, true><<<blocks, 256, 0, st>>>(t, dst); kdbg_check((const void*)mt_predecode2_kernel<4, true>, dim3(blocks), dim3(256), 0); }
 }
 bool launch_q35_g6(const GemvLaunch& P, Q35G6Workspace& W, int pm, cudaStream_t st) {
   if (!W.weights || P.M < 256 || !P.xsum || P.lo || P.fuse || P.draft || P.e_fuse || P.f_mode || P.xsm_part || P.n_seg < 1 || P.n_seg > 3)

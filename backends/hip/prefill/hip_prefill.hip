@@ -75,6 +75,9 @@ static int hpf_mcap_env() { static const int v = [] { const char* e = std::geten
   int def = 256;
 #endif
   int m = e ? std::atoi(e) : def; return m >= 16 ? m : def; }(); return v; }
+// C3 trial: decode straight to row-major, skipping the G6 scratch + repack round-trip.
+// Default on on this branch; YSKN_HIP_PREFILL_FUSEPREP=0 restores decode+repack for A/B.
+static bool hpf_fuseprep_env() { static const bool v = [] { const char* e = std::getenv("YSKN_HIP_PREFILL_FUSEPREP"); return !e || std::atoi(e) != 0; }(); return v; }
 
 void HipPrefillWorkspace::init(size_t arena_b, size_t tensor_b, size_t partial_b, int mmax, cudaStream_t st) {
   if (ok) return;
@@ -154,9 +157,13 @@ bool launch_hip_prefill(const GemvLaunch& P, HipPrefillWorkspace& W, int pm, cud
     const int N = t.N;
     const int8_t* w8;
     if (capture) {
-      q35_g6_decode(t, W.scratch_g6, st);
-      const size_t words = (size_t)N * (Kc >> 2);
-      hpf_repack_kernel<<<(unsigned)((words + 255) / 256), 256, 0, st>>>(W.scratch_g6, N, Kc, W.scratch_rm);
+      if (hpf_fuseprep_env()) {
+        q35_g6_decode_rm(t, reinterpret_cast<uint4*>(W.scratch_rm), st);   // C3: row-major direct, no repack
+      } else {
+        q35_g6_decode(t, W.scratch_g6, st);
+        const size_t words = (size_t)N * (Kc >> 2);
+        hpf_repack_kernel<<<(unsigned)((words + 255) / 256), 256, 0, st>>>(W.scratch_g6, N, Kc, W.scratch_rm);
+      }
       w8 = W.scratch_rm;
     } else {
       const auto it = W.cached.find(t.lno);
@@ -165,9 +172,13 @@ bool launch_hip_prefill(const GemvLaunch& P, HipPrefillWorkspace& W, int pm, cud
         const size_t bytes = (size_t)N * Kc;
         if (bytes > W.arena_bytes) return false;
         if (W.used + bytes > W.arena_bytes) { W.cached.clear(); W.used = 0; }   // tensors arrive layer by layer
-        q35_g6_decode(t, W.scratch_g6, st);
-        const size_t words = (size_t)N * (Kc >> 2);
-        hpf_repack_kernel<<<(unsigned)((words + 255) / 256), 256, 0, st>>>(W.scratch_g6, N, Kc, W.arena + W.used);
+        if (hpf_fuseprep_env()) {
+          q35_g6_decode_rm(t, reinterpret_cast<uint4*>(W.arena + W.used), st);   // C3: row-major direct
+        } else {
+          q35_g6_decode(t, W.scratch_g6, st);
+          const size_t words = (size_t)N * (Kc >> 2);
+          hpf_repack_kernel<<<(unsigned)((words + 255) / 256), 256, 0, st>>>(W.scratch_g6, N, Kc, W.arena + W.used);
+        }
         w8 = W.arena + W.used;
         W.cached[t.lno] = w8; W.used += bytes;
       }
