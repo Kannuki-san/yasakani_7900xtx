@@ -5,11 +5,11 @@
 >
 > This fork adds an independent AMD ROCm/HIP native backend to YASAKANI for the AMD Radeon RX 7900 XTX (gfx1100, RDNA3, wave32). **It runs on Linux only** (ROCm 7.1 / hipcc, built from source). The upstream NVIDIA CUDA backend (Windows) is preserved unchanged; AMD support is added without replacing it.
 >
-> It runs the same Qwen3.8-27B model files: trellis KV5 and bf16 key-value cache, speculative decoding, image input (CPU encoder), and up to 256K context within 24 GB. `yasakani selfcheck` reproduces the RTX 5090 reference (top-1 98.9% trellis / 99.3% bf16); prefill ≈ 543 tok/s (8K) / 199 tok/s (78K). See [BUILDING.md](BUILDING.md) and [backends/hip/README.md](backends/hip/README.md).
+> It runs the same Qwen3.8-27B model files: trellis KV5 and bf16 key-value cache, speculative decoding, image input (CPU encoder), and up to 256K context within 24 GB. `yasakani selfcheck` reproduces the RTX 5090 reference (top-1 98.9% trellis / 99.3% bf16, bit-identical output). Stable (`231d0d3`): prefill ≈ 518 tok/s (8K) / 415 tok/s (16K), decode ≈ 140 tok/s (speed model). See [BUILDING.md](BUILDING.md) and [backends/hip/README.md](backends/hip/README.md).
 >
 > Limits: gfx1100 only (other AMD GPUs untested); the CUDA backend is unchanged from upstream but not re-tested on NVIDIA hardware in this fork; the GPU vision projector (`YASAKANI_VISION_GPU=1`) is untested on AMD (the CPU encoder works).
 >
-> **Performance status: this is a functional "it works" release, not a fast one yet.** Generation is still slow compared to the NVIDIA build — especially with the quality model. It is meant so anyone can try the AMD backend quickly; performance optimization (fused WMMA GEMM, long-context attention, decode/speculative decoding) is the next phase and is ongoing.
+> **Performance status:** the AMD path is optimized for gfx1100 (graph prefill, tuned lnord CTA shape / hipBLAS row-block / chunk size, fused row-major predecode, warp-fence lnord, cache hints). It remains slower than the NVIDIA build on the quality model; long-context attention batching (C6) and further GEMM work are tracked as future candidates. Every fast path has a runtime opt-out (see backends/hip/README.md).
 
 
 > **AMD Radeon RX 7900 XTX (gfx1100) ネイティブHIPバックエンド — Linux専用**

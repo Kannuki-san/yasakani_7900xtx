@@ -71,8 +71,17 @@ cmake --build build -j6
   - `YSKN_PREFILL_GEMM` — hipBLAS int8 prefill GEMM.
 - `YSKN_KVX_MODE` (KV codec: 0=bf16, 1=fp8, 2/3=rotated INT8, 3=trellis) keeps
   the upstream cache default 3 on both backends.
-- HIP-only runtime defaults (CUDA defaults untouched): prefill GEMM and G6
-  weight workspace enabled, `YSKN_Q35_LAYER_ROWS=2048`.
+- HIP-only runtime defaults (CUDA defaults untouched), stable as of `231d0d3`:
+  - `YSKN_Q35_LAYER_ROWS=0` — graph `prefill_chunks` (the vsp super-chunk path is
+    opt-in via `>0`; its overlap kernel `q35_state_nb` needs 80KB LDS > gfx1100
+    64KB and is capability-gated off, see below).
+  - `YSKN_LNO_CFG=2` — lnord UW4 CTA shape (halves per-CTA LUT reload traffic).
+  - `YSKN_HIP_PREFILL_MCAP=512` — single hipBLAS row-block at M=512 (halves weight re-reads).
+  - `YSKN_Q35_PMAX=1024` — larger prefill chunks dilute per-chunk weight prep.
+  - `YSKN_HIP_PREFILL_FUSEPREP=1` — C3: decode writes row-major directly, skipping
+    the G6 scratch + repack round-trip.
+  - state_nb capability gate (`q35_state_nb_fits`): vsp overlap auto-disabled when
+    the device LDS opt-in ceiling < 80,256B (gfx1100); base state kernel commits instead.
 
 ## Kill switches and diagnostics (kept intentionally)
 
@@ -84,6 +93,12 @@ engine then uses the existing converted path:
 | `YSKN_HIP_PREFILL=0` | prefill falls back to the PFA/lnord path |
 | `YSKN_ATX_NATIVE=0` | trellis/pk3 attention falls back to the existing launcher |
 | `YSKN_ATXROW_NATIVE=0` | INT8-row attention falls back to the existing launcher |
+| `YSKN_HIP_PREFILL_FUSEPREP=0` | C3 off: restore decode+repack (G6 scratch round-trip) |
+| `YSKN_LNO_CFG=-1` | restore per-M lnord CTA table (P1 off) |
+| `YSKN_HIP_PREFILL_MCAP=256` | restore 256 row-blocks (P2 off) |
+| `YSKN_Q35_PMAX=512` | restore 512-token prefill chunks (P3 off) |
+| `YSKN_Q35_LAYER_ROWS>0` | opt-in vsp super-chunk (overlap gated by LDS ceiling) |
+| `YSKN_Q35_LAYER_OVERLAP=0` | force vsp overlap off (base state kernel) |
 
 The native launchers also fall back automatically for unsupported
 configurations (see `attention/README.md`). Gated diagnostics remain available:
@@ -154,14 +169,21 @@ change was needed:
   then an OpenAI-style chat request with an `image_url` part (the `chat`
   subcommand is text-only, as upstream).
 
-## Verification status (gfx1100, v0.1.5 integration base)
+## Verification status (gfx1100, stable `231d0d3`)
 
 - Correctness: all 13 tensors × M=17..512 ALL EXACT (bit-exact vs the lnord
-  XSM reference).
-- Selfcheck: top-1 98.9% vs the public RTX 5090 reference, sure-changed 0.
-- Prefill: 8K ≈ 546 tok/s, 78K ≈ 199 tok/s (RX 7900 XTX, trellis KV5).
-- Decode: no regression; speculative-decode accept rates maintained.
+  XSM reference), including C3 row-major predecode and MCAP=512.
+- Selfcheck: top-1 98.9% vs the public RTX 5090 reference, sure-changed 0,
+  output bit-identical (trellis KV5).
+- Prefill (RX 7900 XTX, trellis KV5, speed model): 8K ≈ 518 tok/s,
+  16K ≈ 415 tok/s (graph prefill_chunks + P1/P2/P3 + C3).
+- Decode: ≈ 140 tok/s (speculative, 256-token bench); no regression vs base.
+- state_nb gate: opt-in vsp runs with overlap=0 and zero invalid launches on
+  gfx1100; normal paths bit-exact.
 - Kill switch `YSKN_HIP_PREFILL=0`: clean fallback, no throw.
+- Optimization history / rejected candidates (Q1 launch-bounds, Q3 attention
+  double-buffer, Q4 native fused GEMM, FIN/FLOW/RP_DEFER) and C6 (deferred) are
+  tracked in `zluda-experiment/` (local, not shipped).
 - CPU self-checks (no GPU needed): `prefill/test_hpf_math.cpp`,
   `attention/test_atxrow_math.cpp`, `tests/test_decode_ref.py` — ALL PASS.
   Build recipes are in each file's header comment.
